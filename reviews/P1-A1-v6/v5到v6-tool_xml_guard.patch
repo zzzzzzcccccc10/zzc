@@ -1,0 +1,12 @@
+--- /tmp/v5snap/tool_xml_guard.py	2026-11-18 23:50:07.402731013 +0800
++++ /tmp/rbtest_p1a/tool_xml_guard.py	2026-11-18 23:50:00.122686349 +0800
+@@ -116,7 +116,8 @@
+             break
+         fence = m.group(1)
+         ch, n = fence[0], len(fence)
+-        close = re.compile(r"(?m)^ {0,3}" + re.escape(ch) + "{%d,}[ \t]*$" % n)
++        # Windows 换行（CR LF）：$ 匹配不到行尾 \r 前的位置，必须显式允许 \r
++        close = re.compile(r"(?m)^ {0,3}" + re.escape(ch) + "{%d,}[ \t]*\r?$" % n)
+         c = close.search(text, m.end())
+         end = c.end() if c else len(text)
+         regions.append((m.start(), end))

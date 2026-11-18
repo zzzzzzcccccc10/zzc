@@ -1,0 +1,38 @@
+--- /tmp/v5snap/test_out_guard.py	2026-11-18 23:50:07.406731038 +0800
++++ /tmp/test_out_guard.py	2026-11-18 23:50:00.738690129 +0800
+@@ -202,6 +202,35 @@
+ close_with_text = "```\n代码\n``` 还有字\n<invoke name=\"x\">内部</invoke>\n"
+ ok("关闭行带非空白 → 不算关闭", "<invoke" in txg.finalize_text(close_with_text))
+ 
++print("\n---- 五之七、CRLF 围栏（R5） ----")
++crlf_backtick = (
++    "```xml\r\n"
++    '<invoke name="x">代码示例</invoke>\r\n'
++    "```\r\n"
++    '正文 <invoke name="y">控制内容</invoke>\r\n'
++)
++out_crlf = txg.finalize_text(crlf_backtick)
++ok("CRLF 反引号围栏：闭合后正文控制标记被清理",
++   '<invoke name="y">' not in out_crlf and "代码示例" in out_crlf, repr(out_crlf))
++
++crlf_tilde = (
++    "~~~xml\r\n"
++    '<invoke name="x">代码示例</invoke>\r\n'
++    "~~~\r\n"
++    '正文 <invoke name="y">控制内容</invoke>\r\n'
++)
++out_crlf2 = txg.finalize_text(crlf_tilde)
++ok("CRLF 波浪线围栏：闭合后正文控制标记被清理",
++   '<invoke name="y">' not in out_crlf2 and "代码示例" in out_crlf2, repr(out_crlf2))
++
++code_crlf = "   ```python\r\n   x = 1  \r\n   ```   \r\n"
++ok("CRLF 代码块逐字保留（缩进/尾随空格/换行）",
++   txg.finalize_text(code_crlf) == code_crlf, repr(txg.finalize_text(code_crlf)))
++
++close_space_crlf = "```\r\n代码\r\n```   \r\n正文 <invoke name=\"y\">控制</invoke>\r\n"
++out_crlf3 = txg.finalize_text(close_space_crlf)
++ok("CRLF 闭合行带空格也能识别", '<invoke name="y">' not in out_crlf3, repr(out_crlf3))
++
+ print("\n---- 六、装饰钩子：正常清洗 ----")
+ g = txg.ToolXmlGuard.__new__(txg.ToolXmlGuard)
+ g.cfg = {}
