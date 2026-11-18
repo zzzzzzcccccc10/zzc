@@ -1,0 +1,37 @@
+--- /tmp/v4snap/tool_xml_guard.py	2026-11-18 23:39:00.462634833 +0800
++++ /tmp/rbtest_p1a/tool_xml_guard.py	2026-11-18 23:38:18.654377744 +0800
+@@ -190,15 +190,25 @@
+ 
+ 
+ def _tidy_deleted(orig: str, cleaned: str) -> str:
+-    """只收敛「删除标记」产生的多余空白；原文本来就有的格式不动。"""
+-    c = re.sub(r"[ \t]+$", "", cleaned, flags=re.M)   # 删完留下的行尾空格
+-    if "\n\n" not in orig:
+-        # 原文没有空行：删出来的空行压成单个换行
+-        return re.sub(r"\n{2,}", "\n", c)
+-    if "\n\n\n" in orig:
+-        # 原文本来就有多空行：空行一个字都不动
+-        return c
+-    return re.sub(r"\n{3,}", "\n\n", c)
++    """只处理「删除标记」留下的整行空白；不碰任何原文空白。
++
++    规则（v5，按审查 R1/R2 定）：
++    1. 只删标签及其内部内容，**不修剪行尾空格、不动缩进、不压空行**。
++    2. 删除后某一行只剩空白、而原文该行有内容 → 这行是标记被删走的残留，整行丢掉。
++    3. 行数变化（成对结构跨行删除）时不做行级处理，原样返回，避免误删。
++    """
++    if cleaned == orig:
++        return orig
++    o_lines = orig.split("\n")
++    c_lines = cleaned.split("\n")
++    if len(o_lines) != len(c_lines):
++        return cleaned
++    out = []
++    for o, c in zip(o_lines, c_lines):
++        if c.strip() == "" and o.strip() != "":
++            continue
++        out.append(c)
++    return "\n".join(out)
+ 
+ 
+ def _clean_span(seg: str) -> str:

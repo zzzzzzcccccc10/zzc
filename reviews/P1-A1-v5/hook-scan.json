@@ -1,0 +1,78 @@
+{
+  "root": "/AstrBot/data/plugins",
+  "rows": [
+    {
+      "plugin": "astrbot_plugin_meme_manager",
+      "priority": 99999,
+      "file": "/AstrBot/data/plugins/astrbot_plugin_meme_manager/main.py",
+      "line": 357,
+      "source_line": "@filter.on_decorating_result(priority=99999)",
+      "main_sha256": "dd6616ca31eed345c46f31d06b35ef8ee00bb506e9a7072335870adc1e76f9ca"
+    },
+    {
+      "plugin": "astrbot_plugin_tool_xml_guard",
+      "priority": 100,
+      "file": "/AstrBot/data/plugins/astrbot_plugin_tool_xml_guard/main.py",
+      "line": 79,
+      "source_line": "@filter.on_decorating_result(priority=100)",
+      "main_sha256": "665eabb4ccf328ecf99e2d89fdf701ea0001aedcc4cb5f55085c9c901383dc09"
+    },
+    {
+      "plugin": "astrbot_plugin_style_strip",
+      "priority": 90,
+      "file": "/AstrBot/data/plugins/astrbot_plugin_style_strip/main.py",
+      "line": 84,
+      "source_line": "@filter.on_decorating_result(priority=90)",
+      "main_sha256": "bb2e99845f014e09922ef1c214b77fa3b111e378d1fcce2bdaf7ac27e6797af1"
+    },
+    {
+      "plugin": "astrbot_plugin_face_map",
+      "priority": 80,
+      "file": "/AstrBot/data/plugins/astrbot_plugin_face_map/main.py",
+      "line": 63,
+      "source_line": "@filter.on_decorating_result(priority=80)",
+      "main_sha256": "15b733c9b9f3f53921add7675852a7ac76fe716d3bcbe4d25e24c7af33ac261d"
+    },
+    {
+      "plugin": "astrbot_plugin_rule_guard",
+      "priority": 80,
+      "file": "/AstrBot/data/plugins/astrbot_plugin_rule_guard/main.py",
+      "line": 454,
+      "source_line": "@filter.on_decorating_result(priority=80)",
+      "main_sha256": "fe69f983026d219352e5e392c81986ba1f8c556fd2254a424065ccb97586ceb6"
+    },
+    {
+      "plugin": "astrbot_plugin_recall_guard",
+      "priority": 70,
+      "file": "/AstrBot/data/plugins/astrbot_plugin_recall_guard/main.py",
+      "line": 97,
+      "source_line": "@filter.on_decorating_result(priority=70)",
+      "main_sha256": "3d2519ad4d8ad247b627558990089bb83cf5585bba09cf3b1c5e21fdb3604af9"
+    },
+    {
+      "plugin": "astrbot_plugin_quote_reply",
+      "priority": 60,
+      "file": "/AstrBot/data/plugins/astrbot_plugin_quote_reply/main.py",
+      "line": 29,
+      "source_line": "@filter.on_decorating_result(priority=60)",
+      "main_sha256": "979b4bfa9ee27fe878d987f5004bbb180a75b1650df78e40659a1dab147cf7cb"
+    },
+    {
+      "plugin": "astrbot_plugin_chuanhuatong",
+      "priority": -10,
+      "file": "/AstrBot/data/plugins/astrbot_plugin_chuanhuatong/main.py",
+      "line": 390,
+      "source_line": "@filter.on_decorating_result(priority=-10)",
+      "main_sha256": "7f6baa86449d5610143c8d395beb409354d5fed7e51e9f068e0f41066b557878"
+    }
+  ],
+  "core": {
+    "astrbot_version": "4.29.4",
+    "star_handler_sha256": "0e84e9cf028632661cfd07cdcdcaba4fe4134e140320a23f2f617280e9ccf1df",
+    "sort_impl": "self._handlers.sort(key=lambda h: -h.extras_configs[\"priority\"])"
+  },
+  "coverage_boundary": [
+    "只扫 astrbot_plugin_*/main.py 的静态装饰器",
+    "不覆盖动态注册、别名导入、其它文件里的注册、内置 handler"
+  ]
+}

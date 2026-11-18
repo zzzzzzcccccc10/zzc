@@ -1,0 +1,68 @@
+--- /tmp/v4snap/test_out_guard.py	2026-11-18 23:39:00.470634883 +0800
++++ /tmp/test_out_guard.py	2026-11-18 23:38:19.302381729 +0800
+@@ -55,7 +55,7 @@
+ 
+ print("\n---- 二、不完整标记 ----")
+ for name, src, want in [
+-    ("只有开头", f"正文 {DSML} invoke name=\"x\">", "正文"),
++    ("只有开头", f"正文 {DSML} invoke name=\"x\">", "正文 "),
+     ("只有标签名", "<invoke", ""),
+     ("竖线残留", f"{DSML}>正文", "正文"),
+ ]:
+@@ -167,6 +167,41 @@
+     return ev
+ 
+ 
++print("\n---- 五之五、部分清洗时其余内容逐字保留（R2） ----")
++partial_cases = [
++    ("清洗不影响前面行尾空格",
++     "  前言  \n正文 <invoke name=\"x\">内部</invoke>\n",
++     "  前言  \n正文 \n"),
++    ("清洗不影响后续行尾空格",
++     "正文 <invoke name=\"x\">内部</invoke>\n  后续内容  \n",
++     "正文 \n  后续内容  \n"),
++    ("清洗不影响原有连续空行",
++     "前言\n\n\n正文 <invoke name=\"x\">内部</invoke>\n\n\n结尾",
++     "前言\n\n\n正文 \n\n\n结尾"),
++    ("同处行尾空格也不修剪",
++     "  前言保留空格  \n正文 <invoke name=\"x\">内部</invoke>  \n",
++     "  前言保留空格  \n正文   \n"),
++]
++for name, src, want in partial_cases:
++    got = txg.finalize_text(src)
++    ok(f"部分清洗保真：{name}", got == want, repr(got))
++
++print("\n---- 五之六、围栏边界（R3） ----")
++three_open_four_close = "```\n代码\n````\n之后 <invoke name=\"x\">内部</invoke>\n"
++ok("3 开 4 关：关闭有效，之后内容被清洗", "<invoke" not in txg.finalize_text(three_open_four_close))
++
++four_open_three_close = "````\n代码\n```\n<invoke name=\"propose_change\"><parameter name=\"proposal\">不该入箱</parameter></invoke>\n````\n"
++ok("4 开 3 关：不算关闭，代码内容保留", "<invoke" in txg.finalize_text(four_open_three_close))
++
++tilde_vs_backtick = "```\n代码\n~~~\n<invoke name=\"x\">内部</invoke>\n~~~\n"
++ok("反引号围栏不能被波浪线关闭", "<invoke" in txg.finalize_text(tilde_vs_backtick))
++
++backtick_vs_tilde = "~~~\n代码\n```\n<invoke name=\"x\">内部</invoke>\n```\n"
++ok("波浪线围栏不能被反引号关闭", "<invoke" in txg.finalize_text(backtick_vs_tilde))
++
++close_with_text = "```\n代码\n``` 还有字\n<invoke name=\"x\">内部</invoke>\n"
++ok("关闭行带非空白 → 不算关闭", "<invoke" in txg.finalize_text(close_with_text))
++
+ print("\n---- 六、装饰钩子：正常清洗 ----")
+ g = txg.ToolXmlGuard.__new__(txg.ToolXmlGuard)
+ g.cfg = {}
+@@ -415,6 +450,14 @@
+ after_lit = tmp_plan.read_text(encoding="utf-8") if tmp_plan.exists() else ""
+ ok("四反引号块内字面量三反引号之后的提案不入箱", after_lit == before_lit, after_lit[-30:])
+ 
++before_unc = tmp_plan.read_text(encoding="utf-8") if tmp_plan.exists() else ""
++unclosed_proposal = ("示例：\n```xml\n"
++                     '<invoke name="propose_change"><parameter name="proposal">未闭合也入不了箱</parameter></invoke>')
++ev_unc = guard_ev(unclosed_proposal)
++asyncio.run(g.guard(ev_unc))
++after_unc = tmp_plan.read_text(encoding="utf-8") if tmp_plan.exists() else ""
++ok("未闭合围栏后的假提案不入箱", after_unc == before_unc, after_unc[-30:])
++
+ print("\n---- 十三、读取结果失败 fail-closed ----")
+ class BrokenEv:
+     def __init__(self):
