@@ -1,0 +1,31 @@
+--- "/tmp/zzc/reviews/P1-A2-v11/snapshot/\346\265\213\350\257\225/test_out_guard.py"	2026-11-20 22:33:50.555632142 +0800
++++ "snapshot/\346\265\213\350\257\225/test_out_guard.py"	2026-11-20 22:52:06.670206420 +0800
+@@ -753,6 +753,28 @@
+ _mm = txg.finalize_text(f"{DSML} calls>KEEP_ME{DSML} /invoke>TAIL")
+ ok("v11 MISMATCH 不删正文", "KEEP_ME" in _mm and "TAIL" in _mm, repr(_mm))
+ 
++print("\n---- 二十二、2026-11-20 v12 修订：QUOTE / SYNTAX 内伪候选 ----")
++V12_CASES = [
++    ("引用内候选（无 >）+ 后续合法结构",
++     f"「{DSML} /bad」后面 {DSML} calls>正文</{DSML} calls>",
++     f"「{DSML} /bad」后面 "),
++    ("引用内候选（有 >）+ 后续普通 XML",
++     f"「{DSML} /bad>」后面 <invoke>X</invoke>",
++     f"「{DSML} /bad>」后面 "),
++    ("属性内伪候选（完整结构）",
++     f'{DSML} calls name="{DSML} /bad>">正文</{DSML} calls>',
++     ""),
++    ("属性内伪候选（无闭合）",
++     f'{DSML} calls name="{DSML} /bad>">正文',
++     "正文"),
++    ("引用 + 后续合法结构精确",
++     f"前缀「{DSML} /bad」中段 {DSML} calls>正文</{DSML} calls> 结尾",
++     f"前缀「{DSML} /bad」中段  结尾"),
++]
++for _name, _src, _want in V12_CASES:
++    _got = txg.finalize_text(_src)
++    ok(f"v12：{_name}", _got == _want, repr(_got))
++
+ print("\n==== 汇总 ====")
+ if FAILS:
+     print(f"FAILED {len(FAILS)}: {FAILS}")

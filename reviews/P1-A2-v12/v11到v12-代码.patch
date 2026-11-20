@@ -1,0 +1,93 @@
+--- /tmp/zzc/reviews/P1-A2-v11/snapshot/astrbot_plugin_tool_xml_guard/main.py	2026-11-20 22:33:50.555632142 +0800
++++ snapshot/astrbot_plugin_tool_xml_guard/main.py	2026-11-20 22:52:06.670206420 +0800
+@@ -441,13 +441,33 @@
+             i = code_regions[ri][1]
+             continue
+         if m["is_close"]:
+-            st2, gt = _scan_attrs(text, m["end"])
+-            end = gt if st2 == "FOUND_END" else n
++            ct = _match_close_tag(text, m)
++            if ct is None:
++                # 异常闭合不是合法语法单元，不生成 SYNTAX
++                i = max(m["end"], i + 1)
++                continue
++            out.append((m["start"], ct[1] - 1))
++            i = max(ct[1], m["end"])
++            continue
++        nc = _match_new_close(text, m)
++        if nc is not None:
++            # 合法第二种闭合：语法区间到 `>` 前
++            out.append((m["start"], nc[1] - 1))
++            i = max(nc[1], m["end"])
++            continue
++        if _match_tag(text, m["end"]) is None:
++            # 候选 / 裸标记 / 非标签：不是合法语法单元，不生成 SYNTAX
++            i = max(m["end"], i + 1)
++            continue
++        status, idx = _scan_attrs(text, m["end"])
++        if status == "FOUND_END":
++            out.append((m["start"], idx))
++            i = max(idx, m["end"])
++        elif status == "UNTERMINATED_ATTRIBUTE":
++            out.append((m["start"], n))
++            i = n
+         else:
+-            status, idx = _scan_attrs(text, m["end"])
+-            end = idx if status == "FOUND_END" else n
+-        out.append((m["start"], end))
+-        i = max(end, m["end"])
++            i = max(m["end"], i + 1)
+ 
+     i = 0
+     while i < n:
+@@ -558,27 +578,36 @@
+     return m.start() if m else len(text)
+ 
+ 
+-def _candidate_regions(text: str, code_regions):
++def _candidate_regions(text: str, code_regions, quote_regions, syntax_regions):
+     """非法新闭合候选：从标记起点到候选终点整体隔离。
+ 
+     候选定义：带尖括号的双竖线起始标记，标记后（可隔空白）以 `/` 开头，
+     但没有通过 `_match_new_close()` 的严格校验。
+     隔离区间不参与 R1/R2/R3，也不让普通 XML 清理进入；候选之后的内容照常处理。
++
++    CODE 与 QUOTE 内的标记不识别；被外层合法标签的 SYNTAX 区间包含的标记
++    （例如属性值里的伪候选）也不算独立候选。
+     """
+     out = []
+     n = len(text)
++    skip = _merge_regions(list(code_regions) + list(quote_regions))
+     i = 0
+     while i < n:
+-        ri = _region_index(code_regions, i)
++        ri = _region_index(skip, i)
+         if ri is not None:
+-            i = code_regions[ri][1]
++            i = skip[ri][1]
+             continue
+         m = _find_marker(text, i)
+         if not m:
+             break
+-        ri = _region_index(code_regions, m["start"])
++        ri = _region_index(skip, m["start"])
+         if ri is not None:
+-            i = code_regions[ri][1]
++            i = skip[ri][1]
++            continue
++        pos = m["start"]
++        if any(s < pos < e for s, e in syntax_regions):
++            # 外层合法标签的属性值内伪候选：不是独立候选
++            i = max(m["end"], i + 1)
+             continue
+         if m["kind"] == "open_double" and m["angle"] and _match_new_close(text, m) is None:
+             j = m["end"]
+@@ -761,7 +790,7 @@
+     syntax = _syntax_regions(t, code)
+     quotes = _quote_regions(t, syntax)
+     regions = _merge_regions(code + quotes)
+-    isolated = _candidate_regions(t, code)
++    isolated = _candidate_regions(t, code, quotes, syntax)
+     # 主循环 / R1 / 普通 XML 都用 skip：保护区 + 非法候选隔离区
+     skip = _merge_regions(regions + isolated)
+ 

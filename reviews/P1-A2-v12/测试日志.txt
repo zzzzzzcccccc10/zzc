@@ -1,0 +1,315 @@
+P1-A2 v12 测试日志
+时间：2026-11-20 23:0x（Asia/Shanghai）
+环境：容器 astrbot（AstrBot v4.29.4 / Python 3.12），工作目录 /AstrBot，RB_DIR=/tmp/rbtest_p1a
+命令（在 reviews/P1-A2-v12/ 目录下执行）：
+  docker exec astrbot mkdir -p /tmp/rbtest_p1a
+  docker cp snapshot/astrbot_plugin_tool_xml_guard/main.py astrbot:/tmp/rbtest_p1a/tool_xml_guard.py
+  docker cp baseline/astrbot_plugin_multi_bubble/main.py    astrbot:/tmp/rbtest_p1a/multi_bubble.py
+  docker cp snapshot/测试/test_out_guard.py                  astrbot:/tmp/test_out_guard.py
+  docker exec -w /AstrBot -e PYTHONPATH=/AstrBot -e RB_DIR=/tmp/rbtest_p1a astrbot timeout 120 python -u /tmp/test_out_guard.py
+退出码：0
+汇总：30 组 195 项 ALL PASS
+性能：5KB 文本 10 次平均 5.61ms（要求 < 10ms）
+证据边界：GuardEv / MBCtx 均为隔离测试替身；真实 QQ 发送管道未验证（未部署）。
+
+
+---- 一、残片矩阵 ----
+PASS  清洗：完整 DSML 结构（第二种闭合）   ''
+PASS  清洗：标准 invoke/parameter   '正文'
+PASS  清洗：未闭合 DSML   ''
+PASS  清洗：半角竖线   ''
+PASS  清洗：system_reminder   '正文'
+PASS  清洗：孤立闭合标记（保留）   '</｜｜DSML｜｜ invoke>'
+PASS  清洗：残缺闭合标记（`</<` 叠加 → 保留）   '</<｜｜DSML｜｜ invoke>'
+PASS  清洗：夹在正文中间   '你好\n今天周二'
+
+---- 二、不完整标记 ----
+PASS  不完整标记精确结果：只有开头   '正文 '
+PASS  不完整标记精确结果：只有标签名   ''
+PASS  不完整标记精确结果：竖线残留   '>正文'
+
+---- 二之二、不误删（审查要求） ----
+PASS  不误删：普通竖线标记   '保留 A <|random_token|> 保留 B'
+PASS  不误删：孤立斜杠   '价格 </ 3，其他'
+PASS  不误删：DSML 后跟说明文字（R3 → 只删标记）   ' 普通说明文字不应该被删'
+
+---- 三、幂等 ----
+PASS  幂等：完整结构   ''
+PASS  幂等：夹在正文   '你好\n今天周二'
+
+---- 四、普通文本 / 代码块保真 ----
+PASS  普通文本逐字不变   '用 <div> 包起来，公式 a < b，中文标点“你好”，《标题》，≤ 3，emoji 😊，[微笑] 收尾。'
+PASS  代码块内容不动
+PASS  行内代码不动
+
+---- 四之二、代码围栏 ----
+PASS  代码块内多空行保真   '说明\n```python\na = 1\n\n\nb = 2\n```\n结束'
+PASS  ~~~ 围栏保真
+PASS  四反引号围栏保真
+PASS  未闭合围栏保真   '说明\n```python\nif a < b:\n  print(1)'
+PASS  未闭合围栏尾部空白逐字保真   '说明\n```python\nprint(1)  \n  '
+
+---- 五、has_marker 不误判 ----
+PASS  普通标签不算标记
+PASS  a < b 不算标记
+PASS  DSML 算标记
+PASS  invoke 算标记
+
+---- 五之二、大小写兼容 ----
+PASS  大写 INVOKE 判为标记
+PASS  小写 dsml 判为标记
+PASS  大写标签被清洗   '正文'
+PASS  小写 dsml 被清洗   ''
+
+---- 五之三、围栏按行识别 ----
+PASS  缩进 3 格以内的围栏被识别
+PASS  四反引号块内的三反引号不是结束标记   '````\n```\n<invoke name="propose_change"><'
+
+---- 五之四、逐字保真（v4） ----
+PASS  逐字保真：前言缩进   '  前言\n正文'
+PASS  逐字保真：连续空行   'a\n\n\n\nb'
+PASS  逐字保真：闭合围栏尾部空行   '```\nx\n```\n\n'
+PASS  逐字保真：未闭合围栏尾部空白   '```\nx  \n  '
+PASS  逐字保真：行内反引号不是围栏   '前 ```x``` 后'
+
+---- 五之五、部分清洗时其余内容逐字保留（R2） ----
+PASS  部分清洗保真：清洗不影响前面行尾空格   '  前言  \n正文 \n'
+PASS  部分清洗保真：清洗不影响后续行尾空格   '正文 \n  后续内容  \n'
+PASS  部分清洗保真：清洗不影响原有连续空行   '前言\n\n\n正文 \n\n\n结尾'
+PASS  部分清洗保真：同处行尾空格也不修剪   '  前言保留空格  \n正文   \n'
+
+---- 五之六、围栏边界（R3） ----
+PASS  3 开 4 关：关闭有效，之后内容被清洗
+PASS  4 开 3 关：不算关闭，代码内容保留
+PASS  反引号围栏不能被波浪线关闭
+PASS  波浪线围栏不能被反引号关闭
+PASS  关闭行带非空白 → 不算关闭
+
+---- 五之七、CRLF 围栏（R5） ----
+PASS  CRLF 反引号围栏：闭合后正文控制标记被清理   '```xml\r\n<invoke name="x">代码示例</invoke>\r\n```\r\n正文 \r\n'
+PASS  CRLF 波浪线围栏：闭合后正文控制标记被清理   '~~~xml\r\n<invoke name="x">代码示例</invoke>\r\n~~~\r\n正文 \r\n'
+PASS  CRLF 代码块逐字保留（缩进/尾随空格/换行）   '   ```python\r\n   x = 1  \r\n   ```   \r\n'
+PASS  CRLF 闭合行带空格也能识别   '```\r\n代码\r\n```   \r\n正文 \r\n'
+
+---- 六、装饰钩子：正常清洗 ----
+[22:51:53.727] [astrbot_plugin_tool_xml_guard] [INFO] [rbtest_p1a.tool_xml_guard:1023]: [tool_xml_guard] 已把控制标记从消息里删掉 req=-
+PASS  guard 清洗后保留正文
+PASS  guard 正常时不 stop
+[22:51:53.728] [astrbot_plugin_tool_xml_guard] [WARN] [v4.29.4] [rbtest_p1a.tool_xml_guard:1019]: [tool_xml_guard] 清洗后为空，停止发送 req=-
+PASS  清洗后为空 → stop_event
+PASS  清洗后为空 → 链清空
+
+---- 七、fail-closed ----
+[22:51:53.729] [astrbot_plugin_tool_xml_guard] [ERRO] [v4.29.4] [rbtest_p1a.tool_xml_guard:958]: [tool_xml_guard] 清洗异常（RuntimeError），按 fail-closed 停止发送 req=-
+PASS  清洗抛异常 → stop_event（不放行原文）
+PASS  清洗抛异常 → 链清空
+PASS  清洗抛异常 → 原始标记没有留下
+
+---- 八、钩子顺序 ----
+PASS  tool_xml_guard 优先级 = -1000000   -1000000
+PASS  priority 比 meme_manager 小   -1000000 vs 99999
+PASS  是最末一个执行（降序最后）   [('astrbot_plugin_quote_reply', 60), ('astrbot_plugin_chuanhuatong', -10), ('astrbot_plugin_tool_xml_guard', -1000000)]
+PASS  枚举到全部装饰钩子注册点（≥8）   8
+   全部装饰钩子（按实际执行顺序：priority 降序）：
+         99999  astrbot_plugin_meme_manager
+            90  astrbot_plugin_style_strip
+            80  astrbot_plugin_face_map
+            80  astrbot_plugin_rule_guard
+            70  astrbot_plugin_recall_guard
+            60  astrbot_plugin_quote_reply
+           -10  astrbot_plugin_chuanhuatong
+      -1000000  astrbot_plugin_tool_xml_guard
+PASS  运行时：registry 按 priority 降序返回（大的先执行）   ['probe_high', 'data.plugins.astrbot_plugin_face_map.main_on_decorating', 'probe_low', 'probe_default', 'txg_new_guard']
+PASS  运行时：默认优先级按 0 处理
+
+---- 九、多气泡：拆前清洗 ----
+[22:51:53.742] [astrbot_plugin_multi_bubble] [INFO] [rbtest_p1a.multi_bubble:285]: [multi_bubble] 想 1.6s 再开口
+PASS  拆前清洗：completion_text 不含 DSML   '第一句话说完了。\n第二句话也在这里，而且足够长让它被拆开。第三句话继续补充细节，'
+PASS  拆前清洗：待补发气泡不含 DSML
+
+---- 十、多气泡：补发前清洗 / 空跳过 / 异常中止 ----
+[22:51:53.743] [astrbot_plugin_multi_bubble] [INFO] [rbtest_p1a.multi_bubble:201]: [multi_bubble] 清洗后为空，跳过这条气泡 req=-
+PASS  补发内容不含 DSML   ['干净一句', '第二句正常']
+PASS  清洗后为空的跳过不发   ['干净一句', '第二句正常']
+[22:51:53.744] [astrbot_plugin_multi_bubble] [WARN] [v4.29.4] [rbtest_p1a.multi_bubble:196]: [multi_bubble] 补发清洗失败，中止剩余补发（RuntimeError）req=-
+PASS  补发清洗异常 → 中止剩余（一条都不发）
+PASS  发送失败日志含类型和 req   [multi_bubble] 追加气泡失败（RuntimeError），中止剩余补发 req=req123
+PASS  发送失败日志不含异常消息   [multi_bubble] 追加气泡失败（RuntimeError），中止剩余补发 req=req123
+PASS  发送失败 → 中止剩余（只尝试 1 条）   ['attempt']
+PASS  中止日志含类型和 req   ['[multi_bubble] 追加气泡失败（RuntimeError），中止剩余补发 req=req456']
+PASS  after_sent 异常日志含类型   [multi_bubble] 补发调度失败（AttributeError）req=-
+PASS  after_sent 异常日志不含异常正文   [multi_bubble] 补发调度失败（AttributeError）req=-
+
+---- 十一、多气泡：预处理失败取消拆分 ----
+[22:51:53.745] [Core] [WARN] [v4.29.4] [rbtest_p1a.multi_bubble:254]: [multi_bubble] 预处理清洗失败，取消本轮拆分/补发（RuntimeError）req=-
+PASS  预处理异常 → 不排队补发
+PASS  预处理异常 → 原文保持不动（交给管道清洗）
+
+---- 十二、propose_change 两种格式入箱 ----
+[22:51:53.763] [astrbot_plugin_tool_xml_guard] [INFO] [rbtest_p1a.tool_xml_guard:1017]: [tool_xml_guard] 从 XML 里救回 1 条提案，已入箱
+PASS  普通 XML 提案入箱   
+## 2026-11-20 22:51 · 她随时提（工具
+[22:51:53.763] [astrbot_plugin_tool_xml_guard] [INFO] [rbtest_p1a.tool_xml_guard:1023]: [tool_xml_guard] 已把控制标记从消息里删掉 req=-
+[22:51:53.781] [astrbot_plugin_tool_xml_guard] [INFO] [rbtest_p1a.tool_xml_guard:1017]: [tool_xml_guard] 从 XML 里救回 1 条提案，已入箱
+[22:51:53.781] [Core] [WARN] [v4.29.4] [rbtest_p1a.tool_xml_guard:1019]: [tool_xml_guard] 清洗后为空，停止发送 req=-
+PASS  DSML 包裹提案入箱   · 她随时提（工具XML补录）· 待批
+范围：背景
+提案：加个喝水提醒
+理由：
+
+PASS  DSML 提案（第二种闭合）→ 清洗后为空 → 不发送
+[22:51:53.783] [astrbot_plugin_tool_xml_guard] [INFO] [rbtest_p1a.tool_xml_guard:1023]: [tool_xml_guard] 已把控制标记从消息里删掉 req=-
+PASS  代码块内提案示例不入箱：```
+[22:51:53.784] [astrbot_plugin_tool_xml_guard] [INFO] [rbtest_p1a.tool_xml_guard:1023]: [tool_xml_guard] 已把控制标记从消息里删掉 req=-
+PASS  代码块内提案示例不入箱：~~~
+[22:51:53.785] [astrbot_plugin_tool_xml_guard] [INFO] [rbtest_p1a.tool_xml_guard:1023]: [tool_xml_guard] 已把控制标记从消息里删掉 req=-
+PASS  代码块内提案示例不入箱：four
+[22:51:53.786] [astrbot_plugin_tool_xml_guard] [INFO] [rbtest_p1a.tool_xml_guard:1023]: [tool_xml_guard] 已把控制标记从消息里删掉 req=-
+PASS  代码块内提案示例不入箱：inline
+[22:51:53.786] [astrbot_plugin_tool_xml_guard] [INFO] [rbtest_p1a.tool_xml_guard:1023]: [tool_xml_guard] 已把控制标记从消息里删掉 req=-
+PASS  四反引号块内字面量三反引号之后的提案不入箱   ML补录）· 待批
+范围：背景
+提案：加个喝水提醒
+理由：
+
+[22:51:53.787] [astrbot_plugin_tool_xml_guard] [INFO] [rbtest_p1a.tool_xml_guard:1023]: [tool_xml_guard] 已把控制标记从消息里删掉 req=-
+PASS  未闭合围栏后的假提案不入箱   ML补录）· 待批
+范围：背景
+提案：加个喝水提醒
+理由：
+
+
+---- 十三、读取结果失败 fail-closed ----
+[22:51:53.788] [astrbot_plugin_tool_xml_guard] [ERRO] [v4.29.4] [rbtest_p1a.tool_xml_guard:958]: [tool_xml_guard] 读取结果失败（RuntimeError），按 fail-closed 停止发送 req=-
+PASS  读取结果失败 → stop_event
+
+---- 十四、P1-A2 v7 规范案例 1–31 ----
+PASS  v7 规范 #1   '前缀A  后缀B'
+PASS  v7 规范 #2   '前缀A  后缀文字'
+PASS  v7 规范 #3   '前缀A  后缀文字'
+PASS  v7 规范 #4   '前缀A   后缀文字'
+PASS  v7 规范 #5   '前缀A  后缀B'
+PASS  v7 规范 #6   '这个标记写作 '
+PASS  v7 规范 #7   '他问「｜｜DSML｜｜是什么意思」'
+PASS  v7 规范 #8   '看 `｜｜DSML｜｜ calls` 这个'
+PASS  v7 规范 #9   '说明\n```\n<｜｜DSML｜｜ calls>示例</｜｜DSML｜｜ calls>\n```\n结束'
+PASS  v7 规范 #10   '他问「 后缀'
+PASS  v7 规范 #11   '前缀A  未知标签> 后缀B'
+PASS  v7 规范 #12   '前缀A  后缀文字'
+PASS  v7 规范 #13   '前缀A   name="a>b 后缀文字'
+PASS  v7 规范 #14   '前缀A  后缀文字'
+PASS  v7 规范 #15   "他说的 don't 和 owners' 都在正文里"
+PASS  v7 规范 #16   "她说「it's fine」然后走了"
+PASS  v7 规范 #17   '第一段「引号开头\n\n第二段结尾」'
+PASS  v7 规范 #18   '第一段「引号开头\n第二段结尾」'
+PASS  v7 规范 #19   '前缀A  callsxyz> 后缀B'
+PASS  v7 规范 #20   '前缀A  tool_calls> 后缀B'
+PASS  v7 规范 #21   '<｜｜DSML｜｜ calls>看 `code` 示例</｜｜DSML｜｜ calls>'
+PASS  v7 规范 #22   '第一段「\r\n正文\r\n\r\n第二段结尾」'
+PASS  v7 规范 #23   '看 `a\\`b` 这个'
+PASS  v7 规范 #24   ''
+PASS  v7 规范 #25   '<｜｜DSML｜｜ calls name="a>b'
+PASS  v7 规范 #26   '正文'
+PASS  v7 规范 #27   '<｜｜DSML｜｜ calls>正文</｜｜DSML｜｜ invoke>'
+PASS  v7 规范 #28   '</｜｜DSML｜｜ invoke> 前缀'
+PASS  v7 规范 #29   ' 后缀'
+PASS  v7 规范 #30   '前缀A  后缀B'
+PASS  v7 规范 #31   ''
+
+---- 十五、P1-A2 v4 关键案例 1–14 ----
+PASS  v4 案例 #1   '</｜｜DSML｜｜ invoke> 前缀'
+PASS  v4 案例 #2   '</｜DSML｜ invoke> 前缀'
+PASS  v4 案例 #3   '<｜｜DSML｜｜ calls><｜｜DSML｜｜ invoke>x</｜｜DSML｜｜ calls>'
+PASS  v4 案例 #4   '<｜｜DSML｜｜ calls><｜｜DSML｜｜ invoke>x</｜｜DSML｜｜ invoke>'
+PASS  v4 案例 #5   '外层<｜｜DSML｜｜ calls>完整内层<｜｜DSML｜｜ invoke>x</｜｜DSML｜｜ invoke>'
+PASS  v4 案例 #6   ''
+PASS  v4 案例 #7   '「<｜｜DSML｜｜ calls>示例</｜｜DSML｜｜ calls>」'
+PASS  v4 案例 #8   ''
+PASS  v4 案例 #9   '{"a": "b\\"c"}'
+PASS  v4 案例 #13   '<｜｜DSML｜｜ calls 后缀'
+PASS  v4 案例 #14   '</｜｜DSML｜｜ invoke> 正文'
+
+---- 十六、attrs 三状态 ----
+PASS  _scan_attrs FOUND_END   FOUND_END
+PASS  _scan_attrs UNTERMINATED_ATTRIBUTE   UNTERMINATED_ATTRIBUTE
+PASS  _scan_attrs MISSING_END   MISSING_END
+
+---- 十七、P1-A2 fail-closed 注入（三条链路） ----
+[22:51:53.792] [astrbot_plugin_tool_xml_guard] [ERRO] [v4.29.4] [rbtest_p1a.tool_xml_guard:958]: [tool_xml_guard] 清洗异常（RuntimeError），按 fail-closed 停止发送 req=-
+PASS  注入 _code_regions → 不发送（发送次数 0）
+[22:51:53.793] [astrbot_plugin_tool_xml_guard] [ERRO] [v4.29.4] [rbtest_p1a.tool_xml_guard:958]: [tool_xml_guard] 清洗异常（RuntimeError），按 fail-closed 停止发送 req=-
+PASS  注入 _scan_attrs → 不发送（发送次数 0）
+[22:51:53.794] [astrbot_plugin_tool_xml_guard] [ERRO] [v4.29.4] [rbtest_p1a.tool_xml_guard:958]: [tool_xml_guard] 清洗异常（RuntimeError），按 fail-closed 停止发送 req=-
+PASS  注入 _match_r1 → 不发送（发送次数 0）
+
+---- 十八、P1-A2 幂等 + 性能 ----
+PASS  P1-A2 幂等：完整结构   ''
+PASS  P1-A2 幂等：R2-A   '前缀A  后缀'
+PASS  P1-A2 幂等：R3   '前缀A  后缀B'
+PASS  P1-A2 幂等：引号保护   '「<｜｜DSML｜｜ calls>示例</｜｜DSML｜｜ calls>」'
+PASS  P1-A2 幂等：CRLF 跨段   '第一段「\r\n正文\r\n\r\n第二段结尾」'
+PASS  5KB 文本 < 10ms   5.61ms
+
+---- 十九、2026-11-20 修订：第二种闭合形式 `<｜｜DSML｜｜ /name>` ----
+PASS  新闭合：完整新闭合   ''
+PASS  新闭合：嵌套新闭合   ''
+PASS  新闭合：大小写   ''
+PASS  新闭合：半角竖线新闭合   ''
+PASS  新闭合：闭合尾部空格   ''
+PASS  新闭合：属性引号不影响新闭合   ''
+PASS  新闭合：孤立新闭合   '<｜｜DSML｜｜ /calls>'
+PASS  新闭合：孤立新闭合前缀   '</x><｜｜DSML｜｜ /calls> 后缀'
+PASS  新闭合：错名新闭合   '<｜｜DSML｜｜ calls>正文<｜｜DSML｜｜ /invoke>'
+PASS  新闭合：未知标签新闭合   '正文<｜｜DSML｜｜ /unknown>'
+PASS  新闭合：带属性新闭合   '正文<｜｜DSML｜｜ /calls name="x">'
+PASS  新闭合：带属性标准闭合   '<｜｜DSML｜｜ calls>正文</｜｜DSML｜｜ calls name="x">'
+PASS  新闭合：行内代码内新闭合   '看 `<｜｜DSML｜｜ calls>示例<｜｜DSML｜｜ /calls>` 这个'
+PASS  新闭合：引号内新闭合   '「<｜｜DSML｜｜ calls>示例<｜｜DSML｜｜ /calls>」'
+PASS  新闭合：R1-f 代码相交   '<｜｜DSML｜｜ calls>看 `code` 示例<｜｜DSML｜｜ /calls>'
+PASS  新闭合：跨段新闭合   '\n正文<｜｜DSML｜｜ /calls>'
+PASS  新闭合：缺少空格   '正文<｜｜DSML｜｜/calls>'
+PASS  新闭合：</< 兼容   '</<｜｜DSML｜｜ invoke>'
+PASS  新闭合负例不删正文：带属性新闭合   '正文<｜｜DSML｜｜ /calls name="x">'
+PASS  新闭合负例不进 COMPLETE：带属性新闭合   '正文<｜｜DSML｜｜ /calls name="x">'
+PASS  新闭合负例不删正文：带属性标准闭合   '<｜｜DSML｜｜ calls>正文</｜｜DSML｜｜ calls name="x">'
+PASS  新闭合负例不进 COMPLETE：带属性标准闭合   '<｜｜DSML｜｜ calls>正文</｜｜DSML｜｜ calls name="x">'
+PASS  新闭合负例不删正文：未知标签新闭合   '正文<｜｜DSML｜｜ /unknown>'
+PASS  新闭合负例不进 COMPLETE：未知标签新闭合   '正文<｜｜DSML｜｜ /unknown>'
+PASS  完整 LEAK 清理为空   ''
+PASS  完整 LEAK 不残留 DSML   ''
+PASS  新闭合幂等：完整新闭合   ''
+PASS  新闭合幂等：孤立新闭合   '<｜｜DSML｜｜ /calls>'
+PASS  新闭合幂等：带属性新闭合   '正文<｜｜DSML｜｜ /calls name="x">'
+
+---- 二十、2026-11-20 v9 复审修订（引号感知终点 / 非法候选跳过） ----
+PASS  v10：标准闭合属性值含 > 且未闭合   '<｜｜DSML｜｜ calls>正文</｜｜DSML｜｜ calls name="a>｜｜DSML｜｜ calls>'
+PASS  v10：标准闭合属性值含 >   '<｜｜DSML｜｜ calls>正文</｜｜DSML｜｜ calls name="a>b">'
+PASS  v10：新闭合候选属性值含 > 不删正文   '正文<｜｜DSML｜｜ /calls name="a>b">'
+PASS  v10：新闭合候选属性值含 > 不进 COMPLETE   '正文<｜｜DSML｜｜ /calls name="a>b">'
+PASS  v10：非法候选内部标记不吞正文   '正文<｜｜DSML｜｜ /bad <｜｜DSML｜｜ invoke>x'
+PASS  v10：非法候选整体隔离、内部标记保真   '正文<｜｜DSML｜｜ /bad <｜｜DSML｜｜ invoke>x'
+PASS  v10：非法候选 + 内部 > 不误删正文   '正文<｜｜DSML｜｜ /bad <｜｜DSML｜｜ invoke>>尾巴'
+PASS  v10：非法候选 + 内部 > 隔离保真   '正文<｜｜DSML｜｜ /bad <｜｜DSML｜｜ invoke>>尾巴'
+
+---- 二十一、2026-11-20 v11 修订：非法候选隔离贯穿扫描（KEEP_ME） ----
+PASS  v11 隔离：栈内候选 + UNCLOSED_SINGLE 正文保留   'KEEP_ME<｜｜DSML｜｜ /bad>TAIL'
+PASS  v11 隔离：顶层孤立候选 正文保留   '前缀<｜｜DSML｜｜ /bad>KEEP_ME 后缀'
+PASS  v11 隔离：顶层孤立候选 + 内部完整 invoke 正文保留   '前缀<｜｜DSML｜｜ /bad <｜｜DSML｜｜ invoke>INNER<｜｜DSML｜｜ /invoke>>TAIL 后缀'
+PASS  v11 隔离：候选内完整 invoke（栈内） 正文保留   '<｜｜DSML｜｜ calls>KEEP_ME<｜｜DSML｜｜ /bad <｜｜DSML｜｜ invoke>INNER<｜｜DSML｜｜ /invoke>>TAIL'
+PASS  v11 隔离：候选之后尾部裸标记 正文保留   'KEEP_ME<｜｜DSML｜｜ /bad>TAIL  后缀'
+PASS  v11 隔离：候选之后尾部完整结构 正文保留   '<｜｜DSML｜｜ calls>KEEP_ME<｜｜DSML｜｜ /bad>TAIL <｜｜DSML｜｜ invoke>X<｜｜DSML｜｜ /invoke>尾部'
+PASS  v11 隔离：候选属性含 > 正文保留   'KEEP_ME<｜｜DSML｜｜ /bad name="a>b">TAIL'
+PASS  v11 隔离后：候选之后的完整结构仍按规范清理   '<｜｜DSML｜｜ calls>KEEP_ME<｜｜DSML｜｜ /bad></<｜｜DSML｜｜ calls>TAIL '
+PASS  v11 隔离后：R1-f 不删候选内部正文   '<｜｜DSML｜｜ calls>KEEP_ME<｜｜DSML｜｜ /bad></<｜｜DSML｜｜ calls>TAIL '
+PASS  v11 R1-c 只删外层起始标签   'KEEP_ME<｜｜DSML｜｜ /bad>TAIL'
+PASS  v11 MISMATCH 不删正文   '<｜｜DSML｜｜ calls>KEEP_ME<｜｜DSML｜｜ /invoke>TAIL'
+
+---- 二十二、2026-11-20 v12 修订：QUOTE / SYNTAX 内伪候选 ----
+PASS  v12：引用内候选（无 >）+ 后续合法结构   '「<｜｜DSML｜｜ /bad」后面 '
+PASS  v12：引用内候选（有 >）+ 后续普通 XML   '「<｜｜DSML｜｜ /bad>」后面 '
+PASS  v12：属性内伪候选（完整结构）   ''
+PASS  v12：属性内伪候选（无闭合）   '正文'
+PASS  v12：引用 + 后续合法结构精确   '前缀「<｜｜DSML｜｜ /bad」中段  结尾'
+
+==== 汇总 ====
+ALL PASS
