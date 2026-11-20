@@ -1,0 +1,26 @@
+--- "/tmp/zzc/reviews/P1-A2-v13/snapshot/\346\265\213\350\257\225/test_out_guard.py"	2026-11-20 23:22:59.213511447 +0800
++++ "snapshot/\346\265\213\350\257\225/test_out_guard.py"	2026-11-20 23:38:51.963252697 +0800
+@@ -793,6 +793,23 @@
+     _got = txg.finalize_text(_src)
+     ok(f"v13：{_name}", _got == _want, repr(_got))
+ 
++print("\n---- 二十四、2026-11-20 v14 修订：第二轮扫描尊重已有 DSML SYNTAX ----")
++V14_CASES = [
++    ("DSML 双引号属性内伪 <invoke>（复审输入）",
++     f'{DSML} calls name="<invoke attr=\'x>">ok</{DSML} calls>KEEP{DSML} /bad>TAIL',
++     f"KEEP{DSML} /bad>TAIL"),
++    ("同上 + 后续合法结构",
++     f'{DSML} calls name="<invoke attr=\'x>">ok</{DSML} calls>'
++     f"KEEP{DSML} /bad>TAIL <invoke>X</invoke>",
++     f"KEEP{DSML} /bad>TAIL "),
++    ("DSML 单引号属性内伪 <invoke>",
++     f"{DSML} calls name='<invoke attr=\"x>\"'>ok</{DSML} calls>尾",
++     "尾"),
++]
++for _name, _src, _want in V14_CASES:
++    _got = txg.finalize_text(_src)
++    ok(f"v14：{_name}", _got == _want, repr(_got))
++
+ print("\n==== 汇总 ====")
+ if FAILS:
+     print(f"FAILED {len(FAILS)}: {FAILS}")

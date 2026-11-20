@@ -1,0 +1,81 @@
+--- /tmp/zzc/reviews/P1-A2-v13/snapshot/astrbot_plugin_tool_xml_guard/main.py	2026-11-20 23:22:59.209511422 +0800
++++ snapshot/astrbot_plugin_tool_xml_guard/main.py	2026-11-20 23:38:51.963252697 +0800
+@@ -416,13 +416,16 @@
+ 
+ # ---------------------------------------------------------------- 保护区：SYNTAX / QUOTE
+ 
+-def _syntax_regions(text: str, code_regions):
++def _syntax_regions(text: str, code_regions, dsml_out=None):
+     """在 CODE 外扫描语法区间（DSML 标记 + 白名单普通 XML 标签）。
+ 
+     起始标签：[标记起点, `>` 前)。
+     闭合标签：[标记起点, `>` 前) —— 整体一个区间，内部不产生 QUOTE。
+     属性未闭合 / 无 `>`：一直保护到文本末尾。
+     普通 XML 也要进 SYNTAX，否则 `name="x"` 的属性引号会被误当成 QUOTE。
++
++    dsml_out: 可选列表；传入时把第一轮（DSML）的区间追加进去，
++    供普通 XML 清理只保护 DSML 语法区间、不误保护普通 XML 自身。
+     """
+     out = []
+     n = len(text)
+@@ -469,6 +472,12 @@
+         else:
+             i = max(m["end"], i + 1)
+ 
++    # 第一轮已生成的 DSML 语法区间；第二轮普通 XML 扫描必须先尊重它们，
++    # 否则 DSML 属性里的伪 `<invoke>` 会被当成独立普通 XML 标签。
++    if dsml_out is not None:
++        dsml_out.extend(out)
++    dsml_syntax = list(out)
++
+     i = 0
+     while i < n:
+         ri = _region_index(code_regions, i)
+@@ -477,6 +486,20 @@
+             continue
+         x = _XML_START.search(text, i)
+         c = _XML_CLOSE.search(text, i)
++        if not x and not c:
++            break
++        hits = []
++        if x:
++            hits.append(x.start())
++        if c:
++            hits.append(c.start())
++        hit = min(hits)
++        ri = _region_index(dsml_syntax, hit)
++        if ri is not None:
++            # 命中的是 DSML 标签属性里的伪标签：整段 DSML SYNTAX 跳过，
++            # 但只跳过语法标签区间，不跳过普通 XML 元素的正文
++            i = max(dsml_syntax[ri][1], i + 1)
++            continue
+         if x and (not c or x.start() <= c.start()):
+             start = x.start()
+             ri = _region_index(code_regions, start)
+@@ -796,12 +819,15 @@
+     顺序：CODE → SYNTAX → QUOTE → 保护区 → DSML 主循环（R1/R2/R3）→ 普通 XML。
+     """
+     code = _merge_regions(_code_regions(t) + _inline_code_regions(t))
+-    syntax = _syntax_regions(t, code)
++    dsml_syntax = []
++    syntax = _syntax_regions(t, code, dsml_out=dsml_syntax)
+     quotes = _quote_regions(t, syntax)
+     regions = _merge_regions(code + quotes)
+     isolated = _candidate_regions(t, code, quotes, syntax)
+-    # 主循环 / R1 / 普通 XML 都用 skip：保护区 + 非法候选隔离区
++    # 主循环 / R1 用 skip：保护区 + 非法候选隔离区
+     skip = _merge_regions(regions + isolated)
++    # 普通 XML 清理还要跳过 DSML 语法区间：属性里的伪 <invoke> 不能当独立 XML
++    xml_skip = _merge_regions(skip + dsml_syntax)
+ 
+     dels = []
+     i = 0
+@@ -867,7 +893,7 @@
+             dels.append((tag[2], tag[1]))
+             i = tag[1]
+ 
+-    dels.extend(_xml_deletions(t, skip))
++    dels.extend(_xml_deletions(t, xml_skip))
+     return _apply_deletions(t, dels)
+ 
+ 
