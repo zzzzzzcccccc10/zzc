@@ -1,0 +1,132 @@
+--- /tmp/zzc/reviews/P1-A2-v8/snapshot/astrbot_plugin_tool_xml_guard/main.py	2026-11-20 00:03:26.242936848 +0800
++++ snapshot/astrbot_plugin_tool_xml_guard/main.py	2026-11-20 21:35:39.010555025 +0800
+@@ -300,6 +300,55 @@
+     return (m.group(1).lower(), m.end(), j)
+ 
+ 
++def _match_new_close(text: str, marker):
++    """第二种闭合形式 `<｜｜DSML｜｜ /name>`（2026-11-20 裁定，v8 修订）。
++
++    严格形态：带尖括号、双竖线；标记后至少一个空格/Tab；`/` 后紧跟完整白名单标签名；
++    标签名后只允许空格/Tab 和 `>`。返回 (name, end_after_gt) 或 None。
++    不允许属性或任何额外内容。
++    """
++    if marker["kind"] != "open_double" or not marker["angle"]:
++        return None
++    n = len(text)
++    i = marker["end"]
++    start = i
++    while i < n and text[i] in " \t":
++        i += 1
++    if i == start:          # 至少要有一个空格/Tab
++        return None
++    if i >= n or text[i] != "/":
++        return None
++    i += 1
++    tag = _match_tag(text, i)
++    if tag is None or tag[2] != i:   # `/` 后不能隔空白
++        return None
++    j = tag[1]
++    while j < n and text[j] in " \t":
++        j += 1
++    if j >= n or text[j] != ">":
++        return None
++    return (tag[0], j + 1)
++
++
++def _match_close_tag(text: str, marker):
++    """标准闭合 `</｜｜DSML｜｜ name>` 的严格校验。
++
++    标签名后只允许空格/Tab 和 `>`；带属性或多余文本返回 None（按异常处理，不删正文）。
++    """
++    if not marker["is_close"]:
++        return None
++    tag = _match_tag(text, marker["end"])
++    if tag is None:
++        return None
++    n = len(text)
++    j = tag[1]
++    while j < n and text[j] in " \t":
++        j += 1
++    if j >= n or text[j] != ">":
++        return None
++    return (tag[0], j + 1)
++
++
+ # ---------------------------------------------------------------- 保护区：CODE
+ 
+ def _code_regions(text: str):
+@@ -515,6 +564,10 @@
+     max_depth_box: 可选 [int]，用于把内层最大深度带出去（供 UNCLOSED 区分 C1 / NESTED）。
+     """
+     first = _marker_at(text, pos)
++    nc_first = _match_new_close(text, first)
++    if nc_first is not None:
++        # 孤立的第二种闭合形式：整体保留（与 R1-d 一致）
++        return _Match("ORPHAN_CLOSE", start=pos, skip_to=nc_first[1])
+     status, gt = _scan_attrs(text, first["end"])
+     if status == "UNTERMINATED_ATTRIBUTE":
+         return _Match("ATTR_UNTERMINATED", start=pos, skip_to=len(text))
+@@ -545,6 +598,18 @@
+         i = m["start"]
+         kind = m["kind"]
+         if kind == "open_double":
++            nc = _match_new_close(text, m)
++            if nc is not None:
++                # 第二种闭合形式参与原有的严格栈式配对
++                if not stack:
++                    return _Match("ORPHAN_CLOSE", start=pos, skip_to=nc[1])
++                if nc[0] != stack[-1]:
++                    return _Match("MISMATCH", start=pos, skip_to=nc[1])
++                stack.pop()
++                if not stack:
++                    return _Match("COMPLETE", start=pos, end=nc[1])
++                i = nc[1]
++                continue
+             st, g2 = _scan_attrs(text, m["end"])
+             if st == "UNTERMINATED_ATTRIBUTE":
+                 return _Match("ATTR_UNTERMINATED", start=pos, skip_to=n)
+@@ -558,20 +623,20 @@
+             depth = max(depth, len(stack))
+             i = g2 + 1
+         elif kind == "close_double":
+-            g2 = text.find(">", m["end"])
+-            if g2 == -1:
+-                return _Match("NESTED_UNCLOSED", start=pos, skip_to=n)
+-            t2 = _match_tag(text, m["end"])
+-            if t2 is None:
+-                return _Match("MISMATCH", start=pos, skip_to=g2 + 1)
++            ct = _match_close_tag(text, m)
++            if ct is None:
++                # 闭合标签带属性 / 多余文本 / 未知标签：按异常处理，不猜、不删
++                g2 = text.find(">", m["end"])
++                return _Match("MISMATCH", start=pos,
++                              skip_to=(g2 + 1 if g2 != -1 else n))
+             if not stack:
+-                return _Match("ORPHAN_CLOSE", start=pos, skip_to=g2 + 1)
+-            if t2[0] != stack[-1]:
+-                return _Match("MISMATCH", start=pos, skip_to=g2 + 1)
++                return _Match("ORPHAN_CLOSE", start=pos, skip_to=ct[1])
++            if ct[0] != stack[-1]:
++                return _Match("MISMATCH", start=pos, skip_to=ct[1])
+             stack.pop()
+             if not stack:
+-                return _Match("COMPLETE", start=pos, end=g2 + 1)
+-            i = g2 + 1
++                return _Match("COMPLETE", start=pos, end=ct[1])
++            i = ct[1]
+         else:
+             # 单竖线 / 裸标记不参与 R1 栈
+             i = m["end"]
+@@ -669,6 +734,11 @@
+             continue
+ 
+         if kind == "open_double" and m["angle"]:
++            nc = _match_new_close(t, m)
++            if nc is not None:
++                # 孤立的新闭合形式：整体保留，不删、不回流 R2/R3
++                i = nc[1]
++                continue
+             res = _match_r1(t, i, regions)
+             if res.kind == "COMPLETE":
+                 if _overlaps(regions, res.start, res.end):

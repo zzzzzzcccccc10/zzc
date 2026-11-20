@@ -1,0 +1,95 @@
+--- "/tmp/zzc/reviews/P1-A2-v8/snapshot/\346\265\213\350\257\225/test_out_guard.py"	2026-11-20 00:03:26.242936848 +0800
++++ "snapshot/\346\265\213\350\257\225/test_out_guard.py"	2026-11-20 21:35:39.014555050 +0800
+@@ -40,8 +40,8 @@
+ 
+ print("\n---- 一、残片矩阵 ----")
+ cases = [
+-    # v7 R1-b：外层 calls 未闭合（`<｜｜DSML｜｜ /calls>` 不是闭合形态）→ 嵌套未闭合，整段不删
+-    ("完整 DSML 结构（外层未闭合 → 不删）", LEAK, LEAK),
++    # 2026-11-20 修订：`<｜｜DSML｜｜ /calls>` 是第二种闭合形式 → 完整结构，整段删
++    ("完整 DSML 结构（第二种闭合）", LEAK, ""),
+     ("标准 invoke/parameter", '<invoke name="propose_change"><parameter name="scope">背景</parameter></invoke>正文', "正文"),
+     ("未闭合 DSML", f"{DSML} calls>", ""),
+     ("半角竖线", "<|DSML| calls>", ""),
+@@ -461,11 +461,9 @@
+ asyncio.run(g.guard(ev_q))
+ txt2 = tmp_plan.read_text(encoding="utf-8") if tmp_plan.exists() else ""
+ ok("DSML 包裹提案入箱", "加个喝水提醒" in txt2, txt2[-40:])
+-# v7：提案里的闭合写成了 open 标记形态（`<｜｜DSML｜｜ /invoke>`），栈式配对不成立
+-# → NESTED_UNCLOSED，整段保留（不删）。这是规范行为，风险见交付报告。
+-ok("DSML 提案（open 形态闭合）→ 清洗保留原文、不 stop",
+-   ev_q.stopped is False and len(ev_q._result.chain) == 1
+-   and ev_q._result.chain[0].text == dsml_xml,
++# 2026-11-20 修订：`<｜｜DSML｜｜ /parameter>` / `/invoke>` 是第二种闭合形式 → 完整清理
++ok("DSML 提案（第二种闭合）→ 清洗后为空 → 不发送",
++   ev_q.stopped is True and len(ev_q._result.chain) == 0,
+    repr(ev_q._result.chain[0].text[:40]) if ev_q._result.chain else "")
+ 
+ # 代码块里的提案示例：是文档，不是真调用，不能入箱
+@@ -626,6 +624,66 @@
+ _dt = (_time.perf_counter() - _t0) / 10 * 1000
+ ok("5KB 文本 < 10ms", _dt < 10, f"{_dt:.2f}ms")
+ 
++print("\n---- 十九、2026-11-20 修订：第二种闭合形式 `<｜｜DSML｜｜ /name>` ----")
++NEW_CLOSE_CASES = [
++    ("完整新闭合", "<｜｜DSML｜｜ calls>正文<｜｜DSML｜｜ /calls>", ""),
++    ("嵌套新闭合",
++     "<｜｜DSML｜｜ calls><｜｜DSML｜｜ invoke>x<｜｜DSML｜｜ /invoke><｜｜DSML｜｜ /calls>", ""),
++    ("大小写", "<｜｜DSML｜｜ CALLS>正文<｜｜DSML｜｜ /Calls>", ""),
++    ("半角竖线新闭合", "<||DSML|| calls>正文<||DSML|| /calls>", ""),
++    ("闭合尾部空格", "<｜｜DSML｜｜ calls>正文<｜｜DSML｜｜ /calls  >", ""),
++    ("属性引号不影响新闭合",
++     '<｜｜DSML｜｜ calls name="a>b">正文<｜｜DSML｜｜ /calls>', ""),
++    ("孤立新闭合", "<｜｜DSML｜｜ /calls>", "<｜｜DSML｜｜ /calls>"),
++    ("孤立新闭合前缀", "</x><｜｜DSML｜｜ /calls> 后缀", "</x><｜｜DSML｜｜ /calls> 后缀"),
++    ("错名新闭合", "<｜｜DSML｜｜ calls>正文<｜｜DSML｜｜ /invoke>",
++     "<｜｜DSML｜｜ calls>正文<｜｜DSML｜｜ /invoke>"),
++    ("未知标签新闭合", "<｜｜DSML｜｜ calls>正文<｜｜DSML｜｜ /unknown>",
++     "正文 /unknown>"),
++    ("带属性新闭合", '<｜｜DSML｜｜ calls>正文<｜｜DSML｜｜ /calls name="x">',
++     '正文 /calls name="x">'),
++    ("带属性标准闭合", '<｜｜DSML｜｜ calls>正文</｜｜DSML｜｜ calls name="x">',
++     '<｜｜DSML｜｜ calls>正文</｜｜DSML｜｜ calls name="x">'),
++    ("行内代码内新闭合", "看 `<｜｜DSML｜｜ calls>示例<｜｜DSML｜｜ /calls>` 这个",
++     "看 `<｜｜DSML｜｜ calls>示例<｜｜DSML｜｜ /calls>` 这个"),
++    ("引号内新闭合", "「<｜｜DSML｜｜ calls>示例<｜｜DSML｜｜ /calls>」",
++     "「<｜｜DSML｜｜ calls>示例<｜｜DSML｜｜ /calls>」"),
++    ("R1-f 代码相交", "<｜｜DSML｜｜ calls>看 `code` 示例<｜｜DSML｜｜ /calls>",
++     "<｜｜DSML｜｜ calls>看 `code` 示例<｜｜DSML｜｜ /calls>"),
++    ("跨段新闭合", "<｜｜DSML｜｜ calls>\n\n正文<｜｜DSML｜｜ /calls>",
++     "\n正文<｜｜DSML｜｜ /calls>"),
++    ("缺少空格", "<｜｜DSML｜｜calls>正文<｜｜DSML｜｜/calls>", "正文/calls>"),
++    ("</< 兼容", "</<｜｜DSML｜｜ invoke>", "</<｜｜DSML｜｜ invoke>"),
++]
++for _name, _src, _want in NEW_CLOSE_CASES:
++    _got = txg.finalize_text(_src)
++    ok(f"新闭合：{_name}", _got == _want, repr(_got))
++
++# 带属性/未知标签的负例：不能误判 COMPLETE、不能删正文
++for _name, _src in [
++    ("带属性新闭合", '<｜｜DSML｜｜ calls>正文<｜｜DSML｜｜ /calls name="x">'),
++    ("带属性标准闭合", '<｜｜DSML｜｜ calls>正文</｜｜DSML｜｜ calls name="x">'),
++    ("未知标签新闭合", "<｜｜DSML｜｜ calls>正文<｜｜DSML｜｜ /unknown>"),
++]:
++    _out = txg.finalize_text(_src)
++    ok(f"新闭合负例不删正文：{_name}", "正文" in _out, repr(_out))
++    ok(f"新闭合负例不进 COMPLETE：{_name}", _out != "", repr(_out))
++
++# 完整 LEAK 不再整段保留，且不残留任何 DSML 标记
++_leak_out = txg.finalize_text(LEAK)
++ok("完整 LEAK 清理为空", _leak_out == "", repr(_leak_out))
++ok("完整 LEAK 不残留 DSML", "DSML" not in _leak_out, repr(_leak_out))
++
++# 新闭合幂等
++for _name, _src in [
++    ("完整新闭合", "<｜｜DSML｜｜ calls>x<｜｜DSML｜｜ /calls>"),
++    ("孤立新闭合", "<｜｜DSML｜｜ /calls>"),
++    ("带属性新闭合", '<｜｜DSML｜｜ calls>正文<｜｜DSML｜｜ /calls name="x">'),
++]:
++    _once = txg.finalize_text(_src)
++    _twice = txg.finalize_text(_once)
++    ok(f"新闭合幂等：{_name}", _once == _twice, repr(_twice))
++
+ print("\n==== 汇总 ====")
+ if FAILS:
+     print(f"FAILED {len(FAILS)}: {FAILS}")
