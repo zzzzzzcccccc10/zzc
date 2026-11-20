@@ -1,0 +1,43 @@
+--- /tmp/zzc/reviews/P1-A2-v12/snapshot/astrbot_plugin_tool_xml_guard/main.py	2026-11-20 22:52:06.670206420 +0800
++++ snapshot/astrbot_plugin_tool_xml_guard/main.py	2026-11-20 23:22:59.209511422 +0800
+@@ -477,19 +477,28 @@
+             continue
+         x = _XML_START.search(text, i)
+         c = _XML_CLOSE.search(text, i)
+-        cands = [v for v in ((x.start() if x else None), (c.start() if c else None))
+-                 if v is not None]
+-        if not cands:
++        if x and (not c or x.start() <= c.start()):
++            start = x.start()
++            ri = _region_index(code_regions, start)
++            if ri is not None:
++                i = code_regions[ri][1]
++                continue
++            # 普通 XML 起始标签也要引号感知：单/双引号属性里的 `>` 不能截断
++            st, gt = _scan_attrs(text, x.end())
++            end = gt if st == "FOUND_END" else n
++            out.append((start, end))
++            i = max(end, x.end())
++        elif c:
++            start = c.start()
++            ri = _region_index(code_regions, start)
++            if ri is not None:
++                i = code_regions[ri][1]
++                continue
++            # 普通 XML 闭合标签没有属性，匹配末尾就是 `>`
++            out.append((start, c.end() - 1))
++            i = max(c.end(), start + 1)
++        else:
+             break
+-        start = min(cands)
+-        ri = _region_index(code_regions, start)
+-        if ri is not None:
+-            i = code_regions[ri][1]
+-            continue
+-        gt = text.find(">", start)
+-        end = gt if gt != -1 else n
+-        out.append((start, end))
+-        i = max(end, start + 1)
+ 
+     return _merge_regions(out)
+ 

@@ -1,0 +1,27 @@
+--- "/tmp/zzc/reviews/P1-A2-v12/snapshot/\346\265\213\350\257\225/test_out_guard.py"	2026-11-20 22:52:06.670206420 +0800
++++ "snapshot/\346\265\213\350\257\225/test_out_guard.py"	2026-11-20 23:22:59.213511447 +0800
+@@ -775,6 +775,24 @@
+     _got = txg.finalize_text(_src)
+     ok(f"v12：{_name}", _got == _want, repr(_got))
+ 
++print("\n---- 二十三、2026-11-20 v13 修订：普通 XML 引号感知（单/双引号属性伪候选） ----")
++V13_CASES = [
++    ("单引号属性伪候选",
++     f"<invoke name='x>{DSML} /bad>'>INNER</invoke>", ""),
++    ("双引号属性伪候选",
++     f'<invoke name="x>{DSML} /bad>">INNER</invoke>', ""),
++    ("单引号属性含 >", "<invoke name='a>b'>INNER</invoke>", ""),
++    ("双引号属性含 >", '<invoke name="a>b">INNER</invoke>', ""),
++    ("DSML 单引号属性伪候选",
++     f"{DSML} calls name='x>{DSML} /bad>'>INNER</{DSML} calls>", ""),
++    ("属性伪候选 + 后续合法结构",
++     f'<invoke name=\'x>{DSML} /bad>\'>INNER</invoke>后面 '
++     f'<invoke name="y">X</invoke>', "后面 "),
++]
++for _name, _src, _want in V13_CASES:
++    _got = txg.finalize_text(_src)
++    ok(f"v13：{_name}", _got == _want, repr(_got))
++
+ print("\n==== 汇总 ====")
+ if FAILS:
+     print(f"FAILED {len(FAILS)}: {FAILS}")
