@@ -1,0 +1,1150 @@
+--- baseline/astrbot_plugin_tool_xml_guard/main.py	2026-11-20 22:33:50.551632118 +0800
++++ snapshot/astrbot_plugin_tool_xml_guard/main.py	2026-11-20 22:33:50.555632142 +0800
+@@ -27,6 +27,15 @@
+   原文本来就有的连续空行不动。
+ - **执行顺序**：AstrBot 的 `append()` 是 `sort(key=-priority)`（**priority 大的先执行**），
+   所以"最后一道清洗"要用**最小** priority（-1000000），而不是最大。
++
++2026-11-19 修（P1-A2，按 v7 规范与施工方案 v4）
++---------------------------------------------
++- 控制标记识别改成显式形态匹配：双竖线（主形态）与单竖线（受限形态），带尖括号 / 裸标记分开。
++- 保护区扩成两种：CODE（围栏 + 行内代码）与 QUOTE（同段落成对引号），并叠加 SYNTAX 区间排除属性引号。
++- R1 改成严格栈式配对：完整配对才整段删；有起无闭只删起始标签；错名 / 嵌套未闭合 / 属性未闭合一律不删；
++  跨段落视为不完整（R1-e）。
++- R2 只删到明确的 `>`；没有 `>` 时只删标记和标签名（R2-B）；R3 只删标记，不动其余空白。
++- 与保护区相交的完整结构整体跳过（R1-f），其内部标记不再回流 R2/R3。
+ """
+ 
+ import re
+@@ -55,29 +64,9 @@
+ _XML_NAMES = ("calls", "invoke", "parameter") + LEAK_TAGS
+ _TAGS = "|".join(_XML_NAMES)
+ 
+-# deepseek 的内部结构标记：全角/半角竖线都可能出现，大小写不定
++# deepseek 的内部结构标记（提案救回正则沿用旧形态；清洗主循环用显式形态匹配）
+ _DSML = r"<[｜|]+\s*DSML\s*[｜|]+"
+ 
+-# 成对的 DSML 结构（标签名必须在白名单里）
+-_DSML_PAIR = re.compile(
+-    _DSML + r"\s*([A-Za-z_][A-Za-z0-9_]*)[^>]*>.*?" + _DSML + r"\s*/\s*\1[^>]*>",
+-    re.S | re.I,
+-)
+-# 单个 DSML 标记：只认「标签名在白名单里」的，或什么都不带的裸标记
+-_DSML_TAGGED = re.compile(_DSML + r"\s*(" + _TAGS + r")\b[^>\n]*>?", re.I)
+-_DSML_BARE = re.compile(_DSML + r"\s*>?", re.I)
+-# 残留的竖线包裹片段，必须真的含 DSML
+-_DSML_TAIL = re.compile(r"</?[｜|]+\s*DSML\s*[｜|]+[^>\n]*>?", re.I)
+-
+-# 标准 XML 标签（成对 / 未闭合 / 单独闭合）
+-_XML_PAIR = re.compile(rf"<({_TAGS})\b[^>]*>.*?</\1\s*>", re.S | re.I)
+-_XML_OPEN = re.compile(rf"<({_TAGS})\b[^>\n]*>", re.I)
+-_XML_CLOSE = re.compile(rf"</({_TAGS})\s*>", re.I)
+-
+-# 代码围栏：按行识别开始标记（``` 或 ~~~，允许最多 3 个前导空格）
+-_FENCE_OPEN = re.compile(r"(?m)^ {0,3}(`{3,}|~{3,})[^\n]*\n")
+-_INLINE_CODE = re.compile(r"`[^`\n]*`")
+-
+ # DSML 包裹的 invoke/parameter（用于提案救回）
+ _DSML_INVOKE = re.compile(
+     _DSML + r"\s*invoke\s+name=\"([^\"]+)\"[^>]*>(.*?)" + _DSML + r"\s*/\s*invoke>",
+@@ -91,6 +80,18 @@
+ # 用来判断"要不要进清洗流程"（大小写不敏感）
+ _MARKER = re.compile(r"DSML|<(?:" + _TAGS + r")\b", re.I)
+ 
++# 代码围栏：按行识别开始标记（``` 或 ~~~，允许最多 3 个前导空格）
++_FENCE_OPEN = re.compile(r"(?m)^ {0,3}(`{3,}|~{3,})[^\n]*\n")
++
++# 段落边界：空行（允许空白行）。CRLF 的 \r\n\r\n 同样命中。
++_PARA_BREAK = re.compile(r"\n[ \t\r]*\n")
++
++# 普通 XML 标签（白名单）
++_XML_START = re.compile(r"<(" + _TAGS + r")(?=[\s>/]|$)", re.I)
++_XML_CLOSE = re.compile(r"</(" + _TAGS + r")\s*>", re.I)
++
++
++# ---------------------------------------------------------------- 通用小工具
+ 
+ def _rid(event) -> str:
+     """日志关联用的短 request id（拿不到就 -）。"""
+@@ -106,7 +107,251 @@
+     return "-"
+ 
+ 
+-def _code_regions(text: str) -> list[tuple[int, int]]:
++def _is_escaped(text: str, pos: int) -> bool:
++    """pos 前的连续反斜杠为奇数 → 该字符已转义。"""
++    bs = 0
++    j = pos - 1
++    while j >= 0 and text[j] == "\\":
++        bs += 1
++        j -= 1
++    return bs % 2 == 1
++
++
++def _merge_regions(regions):
++    """排序并合并重叠/相邻区间。"""
++    if not regions:
++        return []
++    ordered = sorted(regions)
++    out = [list(ordered[0])]
++    for s, e in ordered[1:]:
++        if s <= out[-1][1]:
++            if e > out[-1][1]:
++                out[-1][1] = e
++        else:
++            out.append([s, e])
++    return [(s, e) for s, e in out]
++
++
++def _region_index(regions, pos):
++    """pos 落在哪个区间（半开 [start, end)）。"""
++    for idx, (s, e) in enumerate(regions):
++        if s <= pos < e:
++            return idx
++    return None
++
++
++def _overlaps(regions, start: int, end: int) -> bool:
++    """[start, end) 是否与任一保护区区间相交。"""
++    for s, e in regions:
++        if start < e and s < end:
++            return True
++    return False
++
++
++def _apply_deletions(text: str, dels) -> str:
++    """按合并后的删除区间重建文本。"""
++    if not dels:
++        return text
++    merged = _merge_regions(dels)
++    out = []
++    last = 0
++    for s, e in merged:
++        if s < last:
++            s = last
++        if e <= last:
++            continue
++        out.append(text[last:s])
++        last = e
++    out.append(text[last:])
++    return "".join(out)
++
++
++# ---------------------------------------------------------------- 形态匹配
++
++def _marker_at(text: str, pos: int):
++    """在 pos 处尝试匹配一个 DSML 标记。
++
++    返回 dict(kind, start, end, angle, vcount, is_close) 或 None。
++    kind: open_double / close_double / open_single / close_single
++
++    额外兼容一种叠加残片 `</<｜｜DSML｜｜ …>`：模型把 `</` 和 `<｜｜DSML｜｜` 打了两次，
++    这里按「闭合标签」整体保留（D1 精神），避免删掉内部标记后只剩一个孤零零的 `</`。
++    """
++    n = len(text)
++    i = pos
++    has_angle = False
++    is_close = False
++    start = pos
++    if i + 1 < n and text[i] == "<" and text[i + 1] == "/":
++        has_angle = True
++        is_close = True
++        i += 2
++    elif i >= 2 and text[i] == "<" and text[i - 1] == "/" and text[i - 2] == "<":
++        # `</<` 叠加：从外层的 `</` 开始算闭合标签
++        start = i - 2
++        has_angle = True
++        is_close = True
++        i += 1
++    elif i < n and text[i] == "<":
++        has_angle = True
++        i += 1
++
++    j = i
++    while j < n and text[j] in "｜|":
++        j += 1
++    vcount = j - i
++    if vcount not in (1, 2):
++        return None
++    if text[j:j + 4].upper() != "DSML":
++        return None
++    j += 4
++
++    k = j
++    while k < n and text[k] in "｜|":
++        k += 1
++    if k - j != vcount:
++        return None
++
++    kind = ("close" if is_close else "open") + ("_double" if vcount == 2 else "_single")
++    return {
++        "kind": kind,
++        "start": pos,
++        "end": k,
++        "angle": has_angle,
++        "vcount": vcount,
++        "is_close": is_close,
++    }
++
++
++def _find_marker(text: str, pos: int):
++    """从 pos 起找第一个 DSML 标记（跳过普通字符）。"""
++    n = len(text)
++    i = pos
++    while i < n:
++        c = text[i]
++        if c in "<｜|":
++            m = _marker_at(text, i)
++            if m:
++                return m
++        i += 1
++    return None
++
++
++# ---------------------------------------------------------------- 属性扫描
++
++def _is_name_start(c: str) -> bool:
++    return ("A" <= c <= "Z") or ("a" <= c <= "z") or c == "_"
++
++
++def _is_name_char(c: str) -> bool:
++    return _is_name_start(c) or ("0" <= c <= "9") or c in "-:"
++
++
++def _scan_attrs(text: str, start: int):
++    """从 start 扫描到引号外第一个 `>`。
++
++    返回 (status, index)：
++    - FOUND_END: index 是 `>` 的位置
++    - UNTERMINATED_ATTRIBUTE: index 是文本末尾（属性值引号未闭合）
++    - MISSING_END: index 是文本末尾（没有 `>`，也没有未闭合属性）
++    """
++    n = len(text)
++    i = start
++    while i < n:
++        c = text[i]
++        if c == ">":
++            return ("FOUND_END", i)
++        if c in "\"'":
++            # 只有完整属性赋值（属性名 = "值"）才开启属性值；普通撇号不开启
++            j = i - 1
++            while j >= start and text[j] in " \t":
++                j -= 1
++            if j >= start and text[j] == "=":
++                k = j - 1
++                while k >= start and text[k] in " \t":
++                    k -= 1
++                if k >= start and _is_name_char(text[k]):
++                    t = k
++                    while t >= start and _is_name_char(text[t]):
++                        t -= 1
++                    if t + 1 <= k and _is_name_start(text[t + 1]):
++                        close = text.find(c, i + 1)
++                        if close == -1:
++                            return ("UNTERMINATED_ATTRIBUTE", n)
++                        i = close + 1
++                        continue
++        i += 1
++    return ("MISSING_END", n)
++
++
++# ---------------------------------------------------------------- 标签名匹配
++
++_TAG_RE = re.compile(r"(?i)(" + _TAGS + r")(?=[ \t>/]|$)")
++
++
++def _match_tag(text: str, pos: int):
++    """在 pos（可隔空白）匹配白名单标签名。返回 (name, end, start) 或 None。"""
++    j = pos
++    while j < len(text) and text[j] in " \t":
++        j += 1
++    m = _TAG_RE.match(text, j)
++    if not m:
++        return None
++    return (m.group(1).lower(), m.end(), j)
++
++
++def _match_new_close(text: str, marker):
++    """第二种闭合形式 `<｜｜DSML｜｜ /name>`（2026-11-20 裁定，v8 修订）。
++
++    严格形态：带尖括号、双竖线；标记后至少一个空格/Tab；`/` 后紧跟完整白名单标签名；
++    标签名后只允许空格/Tab 和 `>`。返回 (name, end_after_gt) 或 None。
++    不允许属性或任何额外内容。
++    """
++    if marker["kind"] != "open_double" or not marker["angle"]:
++        return None
++    n = len(text)
++    i = marker["end"]
++    start = i
++    while i < n and text[i] in " \t":
++        i += 1
++    if i == start:          # 至少要有一个空格/Tab
++        return None
++    if i >= n or text[i] != "/":
++        return None
++    i += 1
++    tag = _match_tag(text, i)
++    if tag is None or tag[2] != i:   # `/` 后不能隔空白
++        return None
++    j = tag[1]
++    while j < n and text[j] in " \t":
++        j += 1
++    if j >= n or text[j] != ">":
++        return None
++    return (tag[0], j + 1)
++
++
++def _match_close_tag(text: str, marker):
++    """标准闭合 `</｜｜DSML｜｜ name>` 的严格校验。
++
++    标签名后只允许空格/Tab 和 `>`；带属性或多余文本返回 None（按异常处理，不删正文）。
++    """
++    if not marker["is_close"]:
++        return None
++    tag = _match_tag(text, marker["end"])
++    if tag is None:
++        return None
++    n = len(text)
++    j = tag[1]
++    while j < n and text[j] in " \t":
++        j += 1
++    if j >= n or text[j] != ">":
++        return None
++    return (tag[0], j + 1)
++
++
++# ---------------------------------------------------------------- 保护区：CODE
++
++def _code_regions(text: str):
+     """按行识别代码围栏，返回 [(start, end)]（含围栏行）。未闭合一直保护到文本末尾。"""
+     regions = []
+     pos = 0
+@@ -125,6 +370,28 @@
+     return regions
+ 
+ 
++def _inline_code_regions(text: str):
++    """行内代码：单反引号成对，不跨行；前面奇数个反斜杠的反引号不算闭合。"""
++    out = []
++    i = 0
++    n = len(text)
++    while i < n:
++        if text[i] == "`" and not _is_escaped(text, i):
++            k = i + 1
++            found = None
++            while k < n and text[k] != "\n":
++                if text[k] == "`" and not _is_escaped(text, k):
++                    found = k
++                    break
++                k += 1
++            if found is not None:
++                out.append((i, found + 1))
++                i = found + 1
++                continue
++        i += 1
++    return out
++
++
+ def _split_code(text: str):
+     """把文本切成 [(is_code, segment)]，代码段原文不动。"""
+     out = []
+@@ -142,10 +409,430 @@
+     parts = []
+     for is_code, seg in _split_code(text or ""):
+         if not is_code:
+-            parts.append(_INLINE_CODE.sub("", seg))
++            regions = _inline_code_regions(seg)
++            parts.append(_apply_deletions(seg, regions))
+     return "".join(parts)
+ 
+ 
++# ---------------------------------------------------------------- 保护区：SYNTAX / QUOTE
++
++def _syntax_regions(text: str, code_regions):
++    """在 CODE 外扫描语法区间（DSML 标记 + 白名单普通 XML 标签）。
++
++    起始标签：[标记起点, `>` 前)。
++    闭合标签：[标记起点, `>` 前) —— 整体一个区间，内部不产生 QUOTE。
++    属性未闭合 / 无 `>`：一直保护到文本末尾。
++    普通 XML 也要进 SYNTAX，否则 `name="x"` 的属性引号会被误当成 QUOTE。
++    """
++    out = []
++    n = len(text)
++
++    i = 0
++    while i < n:
++        ri = _region_index(code_regions, i)
++        if ri is not None:
++            i = code_regions[ri][1]
++            continue
++        m = _find_marker(text, i)
++        if not m:
++            break
++        ri = _region_index(code_regions, m["start"])
++        if ri is not None:
++            i = code_regions[ri][1]
++            continue
++        if m["is_close"]:
++            st2, gt = _scan_attrs(text, m["end"])
++            end = gt if st2 == "FOUND_END" else n
++        else:
++            status, idx = _scan_attrs(text, m["end"])
++            end = idx if status == "FOUND_END" else n
++        out.append((m["start"], end))
++        i = max(end, m["end"])
++
++    i = 0
++    while i < n:
++        ri = _region_index(code_regions, i)
++        if ri is not None:
++            i = code_regions[ri][1]
++            continue
++        x = _XML_START.search(text, i)
++        c = _XML_CLOSE.search(text, i)
++        cands = [v for v in ((x.start() if x else None), (c.start() if c else None))
++                 if v is not None]
++        if not cands:
++            break
++        start = min(cands)
++        ri = _region_index(code_regions, start)
++        if ri is not None:
++            i = code_regions[ri][1]
++            continue
++        gt = text.find(">", start)
++        end = gt if gt != -1 else n
++        out.append((start, end))
++        i = max(end, start + 1)
++
++    return _merge_regions(out)
++
++
++def _in_same_syntax(open_pos: int, close_end: int, syntax_regions) -> bool:
++    for s, e in syntax_regions:
++        if s <= open_pos and close_end <= e:
++            return True
++    return False
++
++
++def _paragraphs(text: str):
++    out = []
++    last = 0
++    for m in _PARA_BREAK.finditer(text):
++        out.append((last, m.start()))
++        last = m.end()
++    out.append((last, len(text)))
++    return out
++
++
++def _quotes_in(text: str, start: int, end: int, syntax_regions):
++    """同一段落内配对引号。返回 [(open_pos, close_pos+1)]。"""
++    out = []
++    pairs = {"“": "”", "‘": "’", "「": "」", "『": "』"}
++    stack = []
++    i = start
++    while i < end:
++        c = text[i]
++        if c in pairs:
++            stack.append((c, i))
++        elif c in pairs.values():
++            for j in range(len(stack) - 1, -1, -1):
++                oc, op = stack[j]
++                if pairs[oc] == c:
++                    del stack[j:]
++                    if not _in_same_syntax(op, i + 1, syntax_regions):
++                        out.append((op, i + 1))
++                    break
++        i += 1
++
++    # 半角双引号：前面奇数个反斜杠的不参与配对
++    positions = []
++    esc = 0
++    i = start
++    while i < end:
++        c = text[i]
++        if c == "\\":
++            esc += 1
++        elif c == '"':
++            if esc % 2 == 0:
++                positions.append(i)
++            esc = 0
++        else:
++            esc = 0
++        i += 1
++    for k in range(0, len(positions) - 1, 2):
++        o, c2 = positions[k], positions[k + 1]
++        if not _in_same_syntax(o, c2 + 1, syntax_regions):
++            out.append((o, c2 + 1))
++    return out
++
++
++def _quote_regions(text: str, syntax_regions):
++    out = []
++    for s, e in _paragraphs(text):
++        out.extend(_quotes_in(text, s, e, syntax_regions))
++    return _merge_regions(out)
++
++
++# ---------------------------------------------------------------- R1 栈式配对
++
++class _Match:
++    __slots__ = ("kind", "start", "end", "tag_end", "skip_to")
++
++    def __init__(self, kind, start=0, end=0, tag_end=0, skip_to=0):
++        self.kind = kind
++        self.start = start
++        self.end = end
++        self.tag_end = tag_end
++        self.skip_to = skip_to
++
++
++def _paragraph_end(text: str, pos: int) -> int:
++    m = _PARA_BREAK.search(text, pos)
++    return m.start() if m else len(text)
++
++
++def _candidate_regions(text: str, code_regions):
++    """非法新闭合候选：从标记起点到候选终点整体隔离。
++
++    候选定义：带尖括号的双竖线起始标记，标记后（可隔空白）以 `/` 开头，
++    但没有通过 `_match_new_close()` 的严格校验。
++    隔离区间不参与 R1/R2/R3，也不让普通 XML 清理进入；候选之后的内容照常处理。
++    """
++    out = []
++    n = len(text)
++    i = 0
++    while i < n:
++        ri = _region_index(code_regions, i)
++        if ri is not None:
++            i = code_regions[ri][1]
++            continue
++        m = _find_marker(text, i)
++        if not m:
++            break
++        ri = _region_index(code_regions, m["start"])
++        if ri is not None:
++            i = code_regions[ri][1]
++            continue
++        if m["kind"] == "open_double" and m["angle"] and _match_new_close(text, m) is None:
++            j = m["end"]
++            while j < n and text[j] in " \t":
++                j += 1
++            if j < n and text[j] == "/":
++                st, gt = _scan_attrs(text, m["end"])
++                end = gt + 1 if st == "FOUND_END" else n
++                out.append((m["start"], end))
++                i = end
++                continue
++        i = max(m["end"], i + 1)
++    return _merge_regions(out)
++
++
++def _match_r1(text: str, pos: int, regions, max_depth_box=None):
++    """从 pos 处的双竖线起始标签开始做栈式配对。
++
++    max_depth_box: 可选 [int]，用于把内层最大深度带出去（供 UNCLOSED 区分 C1 / NESTED）。
++    """
++    first = _marker_at(text, pos)
++    nc_first = _match_new_close(text, first)
++    if nc_first is not None:
++        # 孤立的第二种闭合形式：整体保留（与 R1-d 一致）
++        return _Match("ORPHAN_CLOSE", start=pos, skip_to=nc_first[1])
++    # 先认标签名：标记后不是白名单标签 → 不是 R1 起始，交给 R2/R3，
++    # 不能先扫属性（否则 MISSING_END 会把整段吞到末尾）
++    tag = _match_tag(text, first["end"])
++    if tag is None:
++        return _Match("NOT_R1")
++    status, gt = _scan_attrs(text, first["end"])
++    if status == "UNTERMINATED_ATTRIBUTE":
++        return _Match("ATTR_UNTERMINATED", start=pos, skip_to=len(text))
++    if status == "MISSING_END":
++        return _Match("ATTR_UNTERMINATED", start=pos, skip_to=len(text))
++
++    para_end = _paragraph_end(text, gt + 1)
++    stack = [tag[0]]
++    depth = 1
++    i = gt + 1
++    n = len(text)
++    while i < n:
++        if i > para_end:
++            return _Match("CROSS_PARAGRAPH", start=pos, tag_end=gt + 1)
++        ri = _region_index(regions, i)
++        if ri is not None:
++            i = regions[ri][1]
++            continue
++        m = _find_marker(text, i)
++        if not m:
++            break
++        if m["start"] > para_end:
++            return _Match("CROSS_PARAGRAPH", start=pos, tag_end=gt + 1)
++        i = m["start"]
++        ri = _region_index(regions, i)
++        if ri is not None:
++            # 保护区 / 隔离区内的标记不参与配对，也不回流
++            i = regions[ri][1]
++            continue
++        kind = m["kind"]
++        if kind == "open_double" and m["angle"]:
++            nc = _match_new_close(text, m)
++            if nc is not None:
++                # 第二种闭合形式参与原有的严格栈式配对
++                if not stack:
++                    return _Match("ORPHAN_CLOSE", start=pos, skip_to=nc[1])
++                if nc[0] != stack[-1]:
++                    return _Match("MISMATCH", start=pos, skip_to=nc[1])
++                stack.pop()
++                if not stack:
++                    return _Match("COMPLETE", start=pos, end=nc[1])
++                i = nc[1]
++                continue
++            # 格式错误的新闭合候选（兜底；正常已由 _candidate_regions 隔离）
++            j = m["end"]
++            while j < n and text[j] in " \t":
++                j += 1
++            if j < n and text[j] == "/":
++                st2, g3 = _scan_attrs(text, m["end"])
++                i = g3 + 1 if st2 == "FOUND_END" else n
++                continue
++            # 先认标签名：标记后不是白名单标签（如裸标记后跟普通正文）→ 跳过，
++            # 不能当成起始标签扫描属性，否则会误触发 ATTR_UNTERMINATED 吞掉整段
++            t2 = _match_tag(text, m["end"])
++            if t2 is None:
++                i = m["end"]
++                continue
++            st, g2 = _scan_attrs(text, m["end"])
++            if st == "UNTERMINATED_ATTRIBUTE":
++                return _Match("ATTR_UNTERMINATED", start=pos, skip_to=n)
++            if st == "MISSING_END":
++                return _Match("ATTR_UNTERMINATED", start=pos, skip_to=n)
++            stack.append(t2[0])
++            depth = max(depth, len(stack))
++            i = g2 + 1
++        elif kind == "close_double":
++            ct = _match_close_tag(text, m)
++            if ct is None:
++                # 闭合标签带属性 / 多余文本 / 未知标签：按异常处理，不猜、不删。
++                # 终点用引号感知扫描，属性值里的 `>` 不能截断 skip_to
++                st2, g2 = _scan_attrs(text, m["end"])
++                return _Match("MISMATCH", start=pos,
++                              skip_to=(g2 + 1 if st2 == "FOUND_END" else n))
++            if not stack:
++                return _Match("ORPHAN_CLOSE", start=pos, skip_to=ct[1])
++            if ct[0] != stack[-1]:
++                return _Match("MISMATCH", start=pos, skip_to=ct[1])
++            stack.pop()
++            if not stack:
++                return _Match("COMPLETE", start=pos, end=ct[1])
++            i = ct[1]
++        else:
++            # 单竖线 / 裸标记不参与 R1 栈
++            i = m["end"]
++
++    if max_depth_box is not None:
++        max_depth_box[0] = depth
++    if len(stack) == 1 and depth == 1:
++        return _Match("UNCLOSED_SINGLE", start=pos, tag_end=gt + 1)
++    return _Match("NESTED_UNCLOSED", start=pos, skip_to=n)
++
++
++# ---------------------------------------------------------------- 普通 XML 清理
++
++def _xml_deletions(text: str, regions):
++    """白名单普通 XML 标签的删除区间（与保护区相交时整体跳过）。"""
++    dels = []
++    n = len(text)
++    i = 0
++    while i < n:
++        ri = _region_index(regions, i)
++        if ri is not None:
++            i = regions[ri][1]
++            continue
++        m = _XML_START.search(text, i)
++        if not m:
++            break
++        name = m.group(1).lower()
++        start = m.start()
++        if _region_index(regions, start) is not None:
++            i = m.end()
++            continue
++        status, gt = _scan_attrs(text, m.end())
++        if status != "FOUND_END":
++            line_end = text.find("\n", m.end())
++            if line_end == -1:
++                line_end = n
++            dels.append((start, line_end))
++            i = line_end
++            continue
++        open_end = gt + 1
++        close_re = re.compile(r"</" + re.escape(name) + r"\s*>", re.I)
++        cm = close_re.search(text, open_end)
++        if cm:
++            ce = cm.end()
++            if _overlaps(regions, start, ce):
++                # 保护区里是示例/引用，不整段删，也不动保护区
++                i = ce
++                continue
++            dels.append((start, ce))
++            i = ce
++            continue
++        dels.append((start, open_end))
++        i = open_end
++
++    for cm in _XML_CLOSE.finditer(text):
++        if _region_index(regions, cm.start()) is None:
++            dels.append(cm.span())
++    return dels
++
++
++# ---------------------------------------------------------------- 清洗
++
++def _clean_segment(t: str) -> str:
++    """清洗一段非围栏文本。
++
++    顺序：CODE → SYNTAX → QUOTE → 保护区 → DSML 主循环（R1/R2/R3）→ 普通 XML。
++    """
++    code = _merge_regions(_code_regions(t) + _inline_code_regions(t))
++    syntax = _syntax_regions(t, code)
++    quotes = _quote_regions(t, syntax)
++    regions = _merge_regions(code + quotes)
++    isolated = _candidate_regions(t, code)
++    # 主循环 / R1 / 普通 XML 都用 skip：保护区 + 非法候选隔离区
++    skip = _merge_regions(regions + isolated)
++
++    dels = []
++    i = 0
++    n = len(t)
++    while i < n:
++        ri = _region_index(skip, i)
++        if ri is not None:
++            i = skip[ri][1]
++            continue
++        m = _find_marker(t, i)
++        if not m:
++            break
++        ri = _region_index(skip, m["start"])
++        if ri is not None:
++            i = skip[ri][1]
++            continue
++        i = m["start"]
++        kind = m["kind"]
++
++        if kind in ("close_double", "close_single"):
++            # R1-d / 4.2：孤立闭合标签整体保留（单竖线闭合也不残留 `</`）
++            st2, gt = _scan_attrs(t, m["end"])
++            i = gt + 1 if st2 == "FOUND_END" else n
++            continue
++
++        if kind == "open_double" and m["angle"]:
++            nc = _match_new_close(t, m)
++            if nc is not None:
++                # 孤立的新闭合形式：整体保留，不删、不回流 R2/R3
++                i = nc[1]
++                continue
++            res = _match_r1(t, i, skip)
++            if res.kind == "COMPLETE":
++                if _overlaps(skip, res.start, res.end):
++                    i = res.end
++                    continue
++                dels.append((res.start, res.end))
++                i = res.end
++                continue
++            if res.kind in ("UNCLOSED_SINGLE", "CROSS_PARAGRAPH"):
++                dels.append((res.start, res.tag_end))
++                i = res.tag_end
++                continue
++            if res.kind in ("ORPHAN_CLOSE", "MISMATCH", "NESTED_UNCLOSED",
++                            "ATTR_UNTERMINATED"):
++                i = res.skip_to
++                continue
++            # NOT_R1 → 落到 R2/R3
++
++        # R2 / R3（裸标记、单竖线、非 R1 的双竖线标记）
++        tag = _match_tag(t, m["end"])
++        if tag is None:
++            dels.append((m["start"], m["end"]))
++            i = m["end"]
++            continue
++        status, gt = _scan_attrs(t, m["end"])
++        if status == "FOUND_END":
++            dels.append((m["start"], gt + 1))
++            i = gt + 1
++        else:
++            # R2-B：只删标记和标签名，两者之间的空白原样保留
++            dels.append((m["start"], m["end"]))
++            dels.append((tag[2], tag[1]))
++            i = tag[1]
++
++    dels.extend(_xml_deletions(t, skip))
++    return _apply_deletions(t, dels)
++
++
+ def parse_invokes(text: str) -> list[dict]:
+     """普通 XML 与 DSML 包裹两种格式都解析。"""
+     out = []
+@@ -162,34 +849,6 @@
+     return out
+ 
+ 
+-def _clean_segment(t: str) -> str:
+-    """清洗一段非代码文本。顺序：整段 → 标记 → 残片。只动白名单标签。"""
+-
+-    def _drop_pair(m):
+-        return "" if m.group(1).lower() in _XML_NAMES else m.group(0)
+-
+-    prev = None
+-    while prev != t:
+-        prev = t
+-        t = _DSML_PAIR.sub(_drop_pair, t)
+-    prev = None
+-    while prev != t:
+-        prev = t
+-        t = _XML_PAIR.sub("", t)
+-    t = _DSML_TAGGED.sub("", t)
+-    t = _DSML_BARE.sub("", t)
+-    t = _DSML_TAIL.sub("", t)
+-    t = _XML_OPEN.sub("", t)
+-    # 行尾孤零零的开标签（连 `>` 都没写完）
+-    t = re.sub(r"<(?:" + _TAGS + r")\b[^>\n]*$", "", t, flags=re.M | re.I)
+-    t = _XML_CLOSE.sub("", t)
+-    t = t.replace("｜DSML｜", "").replace("|DSML|", "")
+-    # 残缺结构被切掉标签名后剩下的 `</`：只删「紧跟竖线开标记」和「行尾孤立」的
+-    t = re.sub(r"</(?=<[｜|])", "", t)
+-    t = re.sub(r"</\s*$", "", t)
+-    return t
+-
+-
+ def _tidy_deleted(orig: str, cleaned: str) -> str:
+     """只处理「删除标记」留下的整行空白；不碰任何原文空白。
+ 
+@@ -213,7 +872,7 @@
+ 
+ 
+ def _clean_span(seg: str) -> str:
+-    """清洗一段不含行内代码的文本。没删除就逐字返回。"""
++    """清洗一段文本。没删除就逐字返回。"""
+     if not seg:
+         return seg
+     cleaned = _clean_segment(seg)
+@@ -223,17 +882,10 @@
+ 
+ 
+ def _clean_piece(piece: str) -> str:
+-    """清洗一段非围栏文本（行内代码跳过）。"""
++    """清洗一段非围栏文本。"""
+     if not piece:
+         return piece
+-    parts = []
+-    last = 0
+-    for m in _INLINE_CODE.finditer(piece):
+-        parts.append(_clean_span(piece[last:m.start()]))
+-        parts.append(m.group(0))
+-        last = m.end()
+-    parts.append(_clean_span(piece[last:]))
+-    return "".join(parts)
++    return _clean_span(piece)
+ 
+ 
+ def finalize_text(text: str) -> str:
+--- "baseline/\346\265\213\350\257\225/test_out_guard.py"	2026-11-20 22:33:50.551632118 +0800
++++ "snapshot/\346\265\213\350\257\225/test_out_guard.py"	2026-11-20 22:33:50.555632142 +0800
+@@ -40,13 +40,16 @@
+ 
+ print("\n---- 一、残片矩阵 ----")
+ cases = [
+-    ("完整 DSML 结构", LEAK, ""),
++    # 2026-11-20 修订：`<｜｜DSML｜｜ /calls>` 是第二种闭合形式 → 完整结构，整段删
++    ("完整 DSML 结构（第二种闭合）", LEAK, ""),
+     ("标准 invoke/parameter", '<invoke name="propose_change"><parameter name="scope">背景</parameter></invoke>正文', "正文"),
+     ("未闭合 DSML", f"{DSML} calls>", ""),
+     ("半角竖线", "<|DSML| calls>", ""),
+     ("system_reminder", "<system_reminder>内部提示</system_reminder>正文", "正文"),
+-    ("孤立闭合标记", "</｜｜DSML｜｜ invoke>", ""),
+-    ("残缺闭合标记", f"</{DSML} invoke>", ""),
++    # v7 R1-d：孤立闭合标签当普通文本保留
++    ("孤立闭合标记（保留）", "</｜｜DSML｜｜ invoke>", "</｜｜DSML｜｜ invoke>"),
++    # `</<` 叠加残片按闭合标签整体保留（`</` 后多一个 `<`）
++    ("残缺闭合标记（`</<` 叠加 → 保留）", f"</{DSML} invoke>", f"</{DSML} invoke>"),
+     ("夹在正文中间", f"你好\n{DSML} calls>\n今天周二", "你好\n今天周二"),
+ ]
+ for name, src, want in cases:
+@@ -57,7 +60,8 @@
+ for name, src, want in [
+     ("只有开头", f"正文 {DSML} invoke name=\"x\">", "正文 "),
+     ("只有标签名", "<invoke", ""),
+-    ("竖线残留", f"{DSML}>正文", "正文"),
++    # v7 R3：标记后不是白名单标签，只删标记，`>` 原样保留
++    ("竖线残留", f"{DSML}>正文", ">正文"),
+ ]:
+     out = txg.finalize_text(src)
+     ok(f"不完整标记精确结果：{name}", out == want, repr(out))
+@@ -66,7 +70,9 @@
+ for name, src, want in [
+     ("普通竖线标记", "保留 A <|random_token|> 保留 B", "保留 A <|random_token|> 保留 B"),
+     ("孤立斜杠", "价格 </ 3，其他", "价格 </ 3，其他"),
+-    ("DSML 后跟说明文字", f"{DSML} 普通说明文字不应该被删", "普通说明文字不应该被删"),
++    # 标记后不是白名单标签 → 不算 R1 起始，按 R3 只删标记（空白原样）
++    ("DSML 后跟说明文字（R3 → 只删标记）", f"{DSML} 普通说明文字不应该被删",
++     " 普通说明文字不应该被删"),
+ ]:
+     got = txg.finalize_text(src)
+     ok(f"不误删：{name}", got == want, repr(got))
+@@ -455,7 +461,10 @@
+ asyncio.run(g.guard(ev_q))
+ txt2 = tmp_plan.read_text(encoding="utf-8") if tmp_plan.exists() else ""
+ ok("DSML 包裹提案入箱", "加个喝水提醒" in txt2, txt2[-40:])
+-ok("DSML 提案清洗后为空 → 不发送", ev_q.stopped is True and len(ev_q._result.chain) == 0)
++# 2026-11-20 修订：`<｜｜DSML｜｜ /parameter>` / `/invoke>` 是第二种闭合形式 → 完整清理
++ok("DSML 提案（第二种闭合）→ 清洗后为空 → 不发送",
++   ev_q.stopped is True and len(ev_q._result.chain) == 0,
++   repr(ev_q._result.chain[0].text[:40]) if ev_q._result.chain else "")
+ 
+ # 代码块里的提案示例：是文档，不是真调用，不能入箱
+ before = tmp_plan.read_text(encoding="utf-8") if tmp_plan.exists() else ""
+@@ -502,6 +511,248 @@
+ asyncio.run(g.guard(ev_b))
+ ok("读取结果失败 → stop_event", ev_b.stopped is True)
+ 
++print("\n---- 十四、P1-A2 v7 规范案例 1–31 ----")
++V7_CASES = [
++    (1, "前缀A <｜｜DSML｜｜ calls>正文</｜｜DSML｜｜ calls> 后缀B", "前缀A  后缀B"),
++    (2, "前缀A ｜｜DSML｜｜ calls> 后缀文字", "前缀A  后缀文字"),
++    (3, '前缀A ｜｜DSML｜｜ invoke name="x"> 后缀文字', "前缀A  后缀文字"),
++    (4, "前缀A ｜｜DSML｜｜ calls 后缀文字", "前缀A   后缀文字"),
++    (5, "前缀A ｜｜DSML｜｜ 后缀B", "前缀A  后缀B"),
++    (6, "这个标记写作 ｜｜DSML｜｜", "这个标记写作 "),
++    (7, "他问「｜｜DSML｜｜是什么意思」", "他问「｜｜DSML｜｜是什么意思」"),
++    (8, "看 `｜｜DSML｜｜ calls` 这个", "看 `｜｜DSML｜｜ calls` 这个"),
++    (9, "说明\n```\n<｜｜DSML｜｜ calls>示例</｜｜DSML｜｜ calls>\n```\n结束",
++        "说明\n```\n<｜｜DSML｜｜ calls>示例</｜｜DSML｜｜ calls>\n```\n结束"),
++    (10, "他问「｜｜DSML｜｜ calls> 后缀", "他问「 后缀"),
++    (11, "前缀A ｜｜DSML｜｜ 未知标签> 后缀B", "前缀A  未知标签> 后缀B"),
++    (12, '前缀A ｜｜DSML｜｜ invoke name="a>b"> 后缀文字', "前缀A  后缀文字"),
++    (13, '前缀A ｜｜DSML｜｜ invoke name="a>b 后缀文字',
++         '前缀A   name="a>b 后缀文字'),
++    (14, "前缀A ｜｜DSML｜｜ invoke name='a>b'> 后缀文字", "前缀A  后缀文字"),
++    (15, "他说的 don't 和 owners' 都在正文里", "他说的 don't 和 owners' 都在正文里"),
++    (16, "她说「it's fine」然后走了", "她说「it's fine」然后走了"),
++    (17, "第一段「引号开头\n\n第二段结尾」", "第一段「引号开头\n\n第二段结尾」"),
++    (18, "第一段「引号开头\n第二段结尾」", "第一段「引号开头\n第二段结尾」"),
++    (19, "前缀A ｜｜DSML｜｜ callsxyz> 后缀B", "前缀A  callsxyz> 后缀B"),
++    (20, "前缀A ｜｜DSML｜｜ tool_calls> 后缀B", "前缀A  tool_calls> 后缀B"),
++    (21, "<｜｜DSML｜｜ calls>看 `code` 示例</｜｜DSML｜｜ calls>",
++         "<｜｜DSML｜｜ calls>看 `code` 示例</｜｜DSML｜｜ calls>"),
++    (22, "第一段「\r\n｜｜DSML｜｜ calls>正文\r\n\r\n第二段结尾」",
++         "第一段「\r\n正文\r\n\r\n第二段结尾」"),
++    (23, "看 `a\\`b` 这个", "看 `a\\`b` 这个"),
++    (24, '<｜｜DSML｜｜ calls name="a>b">正文</｜｜DSML｜｜ calls>', ""),
++    (25, '<｜｜DSML｜｜ calls name="a>b', '<｜｜DSML｜｜ calls name="a>b'),
++    (26, "<｜｜DSML｜｜ calls>正文", "正文"),
++    (27, "<｜｜DSML｜｜ calls>正文</｜｜DSML｜｜ invoke>",
++         "<｜｜DSML｜｜ calls>正文</｜｜DSML｜｜ invoke>"),
++    (28, "</｜｜DSML｜｜ invoke> 前缀", "</｜｜DSML｜｜ invoke> 前缀"),
++    (29, "｜DSML｜ calls> 后缀", " 后缀"),
++    (30, "前缀A ｜｜DSML｜｜ 后缀B", "前缀A  后缀B"),
++    (31, "<｜｜DSML｜｜ calls><｜｜DSML｜｜ invoke>x</｜｜DSML｜｜ invoke></｜｜DSML｜｜ calls>", ""),
++]
++for _n, _src, _want in V7_CASES:
++    _got = txg.finalize_text(_src)
++    ok(f"v7 规范 #{_n}", _got == _want, repr(_got))
++
++print("\n---- 十五、P1-A2 v4 关键案例 1–14 ----")
++V4_CASES = [
++    (1, "</｜｜DSML｜｜ invoke> 前缀", "</｜｜DSML｜｜ invoke> 前缀"),
++    (2, "</｜DSML｜ invoke> 前缀", "</｜DSML｜ invoke> 前缀"),
++    (3, "<｜｜DSML｜｜ calls><｜｜DSML｜｜ invoke>x</｜｜DSML｜｜ calls>",
++        "<｜｜DSML｜｜ calls><｜｜DSML｜｜ invoke>x</｜｜DSML｜｜ calls>"),
++    (4, "<｜｜DSML｜｜ calls><｜｜DSML｜｜ invoke>x</｜｜DSML｜｜ invoke>",
++        "<｜｜DSML｜｜ calls><｜｜DSML｜｜ invoke>x</｜｜DSML｜｜ invoke>"),
++    (5, "外层<｜｜DSML｜｜ calls>完整内层<｜｜DSML｜｜ invoke>x</｜｜DSML｜｜ invoke>",
++        "外层<｜｜DSML｜｜ calls>完整内层<｜｜DSML｜｜ invoke>x</｜｜DSML｜｜ invoke>"),
++    (6, '<｜｜DSML｜｜ calls name="a>b">正文</｜｜DSML｜｜ calls>', ""),
++    (7, "「<｜｜DSML｜｜ calls>示例</｜｜DSML｜｜ calls>」",
++        "「<｜｜DSML｜｜ calls>示例</｜｜DSML｜｜ calls>」"),
++    (8, "<｜DSML｜ calls>", ""),
++    (9, '{"a": "b\\"c"}', '{"a": "b\\"c"}'),
++    (13, "<｜｜DSML｜｜ calls 后缀", "<｜｜DSML｜｜ calls 后缀"),
++    (14, "</｜｜DSML｜｜ invoke> <｜｜DSML｜｜ calls>正文",
++         "</｜｜DSML｜｜ invoke> 正文"),
++]
++for _n, _src, _want in V4_CASES:
++    _got = txg.finalize_text(_src)
++    ok(f"v4 案例 #{_n}", _got == _want, repr(_got))
++
++print("\n---- 十六、attrs 三状态 ----")
++for _label, _text, _want in [
++    ("FOUND_END", '<｜｜DSML｜｜ calls name="x">', "FOUND_END"),
++    ("UNTERMINATED_ATTRIBUTE", '<｜｜DSML｜｜ calls name="x', "UNTERMINATED_ATTRIBUTE"),
++    ("MISSING_END", '<｜｜DSML｜｜ calls', "MISSING_END"),
++]:
++    _m = txg._marker_at(_text, 0)
++    _st, _idx = txg._scan_attrs(_text, _m["end"])
++    ok(f"_scan_attrs {_label}", _st == _want, _st)
++
++print("\n---- 十七、P1-A2 fail-closed 注入（三条链路） ----")
++for _fn in ("_code_regions", "_scan_attrs", "_match_r1"):
++    _orig = getattr(txg, _fn)
++
++    def _inject(*_a, **_k):
++        raise RuntimeError("injected")
++
++    setattr(txg, _fn, _inject)
++    _ev = guard_ev(f"{DSML} calls>正文")
++    asyncio.run(g.guard(_ev))
++    ok(f"注入 {_fn} → 不发送（发送次数 0）",
++       _ev.stopped is True and len(_ev._result.chain) == 0)
++    setattr(txg, _fn, _orig)
++
++print("\n---- 十八、P1-A2 幂等 + 性能 ----")
++for _name, _src in [
++    ("完整结构", "<｜｜DSML｜｜ calls>x</｜｜DSML｜｜ calls>"),
++    ("R2-A", "前缀A ｜｜DSML｜｜ calls> 后缀"),
++    ("R3", "前缀A ｜｜DSML｜｜ 后缀B"),
++    ("引号保护", "「<｜｜DSML｜｜ calls>示例</｜｜DSML｜｜ calls>」"),
++    ("CRLF 跨段", "第一段「\r\n｜｜DSML｜｜ calls>正文\r\n\r\n第二段结尾」"),
++]:
++    _once = txg.finalize_text(_src)
++    _twice = txg.finalize_text(_once)
++    ok(f"P1-A2 幂等：{_name}", _once == _twice, repr(_twice))
++
++import time as _time  # noqa: E402
++
++_unit = ("正常正文，包含一些说明文字和标点。" * 8
++         + "<｜｜DSML｜｜ calls>示例</｜｜DSML｜｜ calls>\n")
++_big = (_unit * 40)[:5000]
++_t0 = _time.perf_counter()
++for _ in range(10):
++    txg.finalize_text(_big)
++_dt = (_time.perf_counter() - _t0) / 10 * 1000
++ok("5KB 文本 < 10ms", _dt < 10, f"{_dt:.2f}ms")
++
++print("\n---- 十九、2026-11-20 修订：第二种闭合形式 `<｜｜DSML｜｜ /name>` ----")
++NEW_CLOSE_CASES = [
++    ("完整新闭合", "<｜｜DSML｜｜ calls>正文<｜｜DSML｜｜ /calls>", ""),
++    ("嵌套新闭合",
++     "<｜｜DSML｜｜ calls><｜｜DSML｜｜ invoke>x<｜｜DSML｜｜ /invoke><｜｜DSML｜｜ /calls>", ""),
++    ("大小写", "<｜｜DSML｜｜ CALLS>正文<｜｜DSML｜｜ /Calls>", ""),
++    ("半角竖线新闭合", "<||DSML|| calls>正文<||DSML|| /calls>", ""),
++    ("闭合尾部空格", "<｜｜DSML｜｜ calls>正文<｜｜DSML｜｜ /calls  >", ""),
++    ("属性引号不影响新闭合",
++     '<｜｜DSML｜｜ calls name="a>b">正文<｜｜DSML｜｜ /calls>', ""),
++    ("孤立新闭合", "<｜｜DSML｜｜ /calls>", "<｜｜DSML｜｜ /calls>"),
++    ("孤立新闭合前缀", "</x><｜｜DSML｜｜ /calls> 后缀", "</x><｜｜DSML｜｜ /calls> 后缀"),
++    ("错名新闭合", "<｜｜DSML｜｜ calls>正文<｜｜DSML｜｜ /invoke>",
++     "<｜｜DSML｜｜ calls>正文<｜｜DSML｜｜ /invoke>"),
++    ("未知标签新闭合", "<｜｜DSML｜｜ calls>正文<｜｜DSML｜｜ /unknown>",
++     "正文<｜｜DSML｜｜ /unknown>"),
++    ("带属性新闭合", '<｜｜DSML｜｜ calls>正文<｜｜DSML｜｜ /calls name="x">',
++     '正文<｜｜DSML｜｜ /calls name="x">'),
++    ("带属性标准闭合", '<｜｜DSML｜｜ calls>正文</｜｜DSML｜｜ calls name="x">',
++     '<｜｜DSML｜｜ calls>正文</｜｜DSML｜｜ calls name="x">'),
++    ("行内代码内新闭合", "看 `<｜｜DSML｜｜ calls>示例<｜｜DSML｜｜ /calls>` 这个",
++     "看 `<｜｜DSML｜｜ calls>示例<｜｜DSML｜｜ /calls>` 这个"),
++    ("引号内新闭合", "「<｜｜DSML｜｜ calls>示例<｜｜DSML｜｜ /calls>」",
++     "「<｜｜DSML｜｜ calls>示例<｜｜DSML｜｜ /calls>」"),
++    ("R1-f 代码相交", "<｜｜DSML｜｜ calls>看 `code` 示例<｜｜DSML｜｜ /calls>",
++     "<｜｜DSML｜｜ calls>看 `code` 示例<｜｜DSML｜｜ /calls>"),
++    ("跨段新闭合", "<｜｜DSML｜｜ calls>\n\n正文<｜｜DSML｜｜ /calls>",
++     "\n正文<｜｜DSML｜｜ /calls>"),
++    ("缺少空格", "<｜｜DSML｜｜calls>正文<｜｜DSML｜｜/calls>", "正文<｜｜DSML｜｜/calls>"),
++    ("</< 兼容", "</<｜｜DSML｜｜ invoke>", "</<｜｜DSML｜｜ invoke>"),
++]
++for _name, _src, _want in NEW_CLOSE_CASES:
++    _got = txg.finalize_text(_src)
++    ok(f"新闭合：{_name}", _got == _want, repr(_got))
++
++# 带属性/未知标签的负例：不能误判 COMPLETE、不能删正文
++for _name, _src in [
++    ("带属性新闭合", '<｜｜DSML｜｜ calls>正文<｜｜DSML｜｜ /calls name="x">'),
++    ("带属性标准闭合", '<｜｜DSML｜｜ calls>正文</｜｜DSML｜｜ calls name="x">'),
++    ("未知标签新闭合", "<｜｜DSML｜｜ calls>正文<｜｜DSML｜｜ /unknown>"),
++]:
++    _out = txg.finalize_text(_src)
++    ok(f"新闭合负例不删正文：{_name}", "正文" in _out, repr(_out))
++    ok(f"新闭合负例不进 COMPLETE：{_name}", _out != "", repr(_out))
++
++# 完整 LEAK 不再整段保留，且不残留任何 DSML 标记
++_leak_out = txg.finalize_text(LEAK)
++ok("完整 LEAK 清理为空", _leak_out == "", repr(_leak_out))
++ok("完整 LEAK 不残留 DSML", "DSML" not in _leak_out, repr(_leak_out))
++
++# 新闭合幂等
++for _name, _src in [
++    ("完整新闭合", "<｜｜DSML｜｜ calls>x<｜｜DSML｜｜ /calls>"),
++    ("孤立新闭合", "<｜｜DSML｜｜ /calls>"),
++    ("带属性新闭合", '<｜｜DSML｜｜ calls>正文<｜｜DSML｜｜ /calls name="x">'),
++]:
++    _once = txg.finalize_text(_src)
++    _twice = txg.finalize_text(_once)
++    ok(f"新闭合幂等：{_name}", _once == _twice, repr(_twice))
++
++print("\n---- 二十、2026-11-20 v9 复审修订（引号感知终点 / 非法候选跳过） ----")
++V10_CASES = [
++    # 标准闭合属性值含 `>` 且属性未闭合：不因 find(">") 截断而误删后面内容
++    ("标准闭合属性值含 > 且未闭合",
++     '<｜｜DSML｜｜ calls>正文</｜｜DSML｜｜ calls name="a>｜｜DSML｜｜ calls>',
++     '<｜｜DSML｜｜ calls>正文</｜｜DSML｜｜ calls name="a>｜｜DSML｜｜ calls>'),
++    # 标准闭合属性值含 `>` 且闭合：整段按异常处理，不判 COMPLETE、不删正文
++    ("标准闭合属性值含 >",
++     '<｜｜DSML｜｜ calls>正文</｜｜DSML｜｜ calls name="a>b">',
++     '<｜｜DSML｜｜ calls>正文</｜｜DSML｜｜ calls name="a>b">'),
++]
++for _name, _src, _want in V10_CASES:
++    _got = txg.finalize_text(_src)
++    ok(f"v10：{_name}", _got == _want, repr(_got))
++
++# 新闭合候选带属性值含 `>`：不能误判 COMPLETE，正文保留
++_v10a = txg.finalize_text('<｜｜DSML｜｜ calls>正文<｜｜DSML｜｜ /calls name="a>b">')
++ok("v10：新闭合候选属性值含 > 不删正文", "正文" in _v10a, repr(_v10a))
++ok("v10：新闭合候选属性值含 > 不进 COMPLETE", _v10a != "", repr(_v10a))
++
++# 非法新闭合候选内部还有标记：整体跳过，不把内部标记当结构、不吞正文
++_v10b = txg.finalize_text("<｜｜DSML｜｜ calls>正文<｜｜DSML｜｜ /bad <｜｜DSML｜｜ invoke>x")
++ok("v10：非法候选内部标记不吞正文", "正文" in _v10b and "x" in _v10b, repr(_v10b))
++ok("v10：非法候选整体隔离、内部标记保真",
++   "｜｜DSML｜｜ invoke" in _v10b, repr(_v10b))
++
++_v10c = txg.finalize_text("<｜｜DSML｜｜ calls>正文<｜｜DSML｜｜ /bad <｜｜DSML｜｜ invoke>>尾巴")
++ok("v10：非法候选 + 内部 > 不误删正文", "正文" in _v10c and "尾巴" in _v10c, repr(_v10c))
++ok("v10：非法候选 + 内部 > 隔离保真",
++   "｜｜DSML｜｜ invoke" in _v10c, repr(_v10c))
++
++print("\n---- 二十一、2026-11-20 v11 修订：非法候选隔离贯穿扫描（KEEP_ME） ----")
++KEEP_CASES = [
++    ("栈内候选 + UNCLOSED_SINGLE",
++     f"{DSML} calls>KEEP_ME{DSML} /bad>TAIL", ("KEEP_ME", "TAIL")),
++    ("顶层孤立候选",
++     f"前缀{DSML} /bad>KEEP_ME 后缀", ("前缀", "KEEP_ME", "后缀")),
++    ("顶层孤立候选 + 内部完整 invoke",
++     f"前缀{DSML} /bad {DSML} invoke>INNER{DSML} /invoke>>TAIL 后缀",
++     ("INNER", "TAIL", "后缀")),
++    ("候选内完整 invoke（栈内）",
++     f"{DSML} calls>KEEP_ME{DSML} /bad {DSML} invoke>INNER{DSML} /invoke>>TAIL",
++     ("KEEP_ME", "INNER", "TAIL")),
++    ("候选之后尾部裸标记",
++     f"{DSML} calls>KEEP_ME{DSML} /bad>TAIL {DSML} 后缀",
++     ("KEEP_ME", "TAIL", "后缀")),
++    ("候选之后尾部完整结构",
++     f"{DSML} calls>KEEP_ME{DSML} /bad>TAIL {DSML} invoke>X{DSML} /invoke>尾部",
++     ("KEEP_ME", "TAIL", "X", "尾部")),
++    ("候选属性含 >",
++     f'{DSML} calls>KEEP_ME{DSML} /bad name="a>b">TAIL',
++     ("KEEP_ME", "TAIL")),
++]
++for _name, _src, _must in KEEP_CASES:
++    _out = txg.finalize_text(_src)
++    ok(f"v11 隔离：{_name} 正文保留", all(x in _out for x in _must), repr(_out))
++
++# 候选之后仍按规范处理：外层完整但含候选 → R1-f 跳过外层；候选之后的合法结构照常清理
++_r1f = txg.finalize_text(
++    f"{DSML} calls>KEEP_ME{DSML} /bad></{DSML} calls>TAIL {DSML} invoke>X{DSML} /invoke>")
++ok("v11 隔离后：候选之后的完整结构仍按规范清理", "X" not in _r1f, repr(_r1f))
++ok("v11 隔离后：R1-f 不删候选内部正文", "KEEP_ME" in _r1f and "TAIL" in _r1f, repr(_r1f))
++
++# R1-c / MISMATCH / skip_to：只删该删的，不扩大正文删除
++_r1c = txg.finalize_text(f"{DSML} calls>KEEP_ME{DSML} /bad>TAIL")
++ok("v11 R1-c 只删外层起始标签", _r1c.startswith("KEEP_ME"), repr(_r1c))
++_mm = txg.finalize_text(f"{DSML} calls>KEEP_ME{DSML} /invoke>TAIL")
++ok("v11 MISMATCH 不删正文", "KEEP_ME" in _mm and "TAIL" in _mm, repr(_mm))
++
+ print("\n==== 汇总 ====")
+ if FAILS:
+     print(f"FAILED {len(FAILS)}: {FAILS}")

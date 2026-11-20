@@ -1,0 +1,304 @@
+--- "baseline/\346\265\213\350\257\225/test_out_guard.py"	2026-11-20 22:33:50.551632118 +0800
++++ "snapshot/\346\265\213\350\257\225/test_out_guard.py"	2026-11-20 22:33:50.555632142 +0800
+@@ -40,13 +40,16 @@
+ 
+ print("\n---- 一、残片矩阵 ----")
+ cases = [
+-    ("完整 DSML 结构", LEAK, ""),
++    # 2026-11-20 修订：`<｜｜DSML｜｜ /calls>` 是第二种闭合形式 → 完整结构，整段删
++    ("完整 DSML 结构（第二种闭合）", LEAK, ""),
+     ("标准 invoke/parameter", '<invoke name="propose_change"><parameter name="scope">背景</parameter></invoke>正文', "正文"),
+     ("未闭合 DSML", f"{DSML} calls>", ""),
+     ("半角竖线", "<|DSML| calls>", ""),
+     ("system_reminder", "<system_reminder>内部提示</system_reminder>正文", "正文"),
+-    ("孤立闭合标记", "</｜｜DSML｜｜ invoke>", ""),
+-    ("残缺闭合标记", f"</{DSML} invoke>", ""),
++    # v7 R1-d：孤立闭合标签当普通文本保留
++    ("孤立闭合标记（保留）", "</｜｜DSML｜｜ invoke>", "</｜｜DSML｜｜ invoke>"),
++    # `</<` 叠加残片按闭合标签整体保留（`</` 后多一个 `<`）
++    ("残缺闭合标记（`</<` 叠加 → 保留）", f"</{DSML} invoke>", f"</{DSML} invoke>"),
+     ("夹在正文中间", f"你好\n{DSML} calls>\n今天周二", "你好\n今天周二"),
+ ]
+ for name, src, want in cases:
+@@ -57,7 +60,8 @@
+ for name, src, want in [
+     ("只有开头", f"正文 {DSML} invoke name=\"x\">", "正文 "),
+     ("只有标签名", "<invoke", ""),
+-    ("竖线残留", f"{DSML}>正文", "正文"),
++    # v7 R3：标记后不是白名单标签，只删标记，`>` 原样保留
++    ("竖线残留", f"{DSML}>正文", ">正文"),
+ ]:
+     out = txg.finalize_text(src)
+     ok(f"不完整标记精确结果：{name}", out == want, repr(out))
+@@ -66,7 +70,9 @@
+ for name, src, want in [
+     ("普通竖线标记", "保留 A <|random_token|> 保留 B", "保留 A <|random_token|> 保留 B"),
+     ("孤立斜杠", "价格 </ 3，其他", "价格 </ 3，其他"),
+-    ("DSML 后跟说明文字", f"{DSML} 普通说明文字不应该被删", "普通说明文字不应该被删"),
++    # 标记后不是白名单标签 → 不算 R1 起始，按 R3 只删标记（空白原样）
++    ("DSML 后跟说明文字（R3 → 只删标记）", f"{DSML} 普通说明文字不应该被删",
++     " 普通说明文字不应该被删"),
+ ]:
+     got = txg.finalize_text(src)
+     ok(f"不误删：{name}", got == want, repr(got))
+@@ -455,7 +461,10 @@
+ asyncio.run(g.guard(ev_q))
+ txt2 = tmp_plan.read_text(encoding="utf-8") if tmp_plan.exists() else ""
+ ok("DSML 包裹提案入箱", "加个喝水提醒" in txt2, txt2[-40:])
+-ok("DSML 提案清洗后为空 → 不发送", ev_q.stopped is True and len(ev_q._result.chain) == 0)
++# 2026-11-20 修订：`<｜｜DSML｜｜ /parameter>` / `/invoke>` 是第二种闭合形式 → 完整清理
++ok("DSML 提案（第二种闭合）→ 清洗后为空 → 不发送",
++   ev_q.stopped is True and len(ev_q._result.chain) == 0,
++   repr(ev_q._result.chain[0].text[:40]) if ev_q._result.chain else "")
+ 
+ # 代码块里的提案示例：是文档，不是真调用，不能入箱
+ before = tmp_plan.read_text(encoding="utf-8") if tmp_plan.exists() else ""
+@@ -502,6 +511,248 @@
+ asyncio.run(g.guard(ev_b))
+ ok("读取结果失败 → stop_event", ev_b.stopped is True)
+ 
++print("\n---- 十四、P1-A2 v7 规范案例 1–31 ----")
++V7_CASES = [
++    (1, "前缀A <｜｜DSML｜｜ calls>正文</｜｜DSML｜｜ calls> 后缀B", "前缀A  后缀B"),
++    (2, "前缀A ｜｜DSML｜｜ calls> 后缀文字", "前缀A  后缀文字"),
++    (3, '前缀A ｜｜DSML｜｜ invoke name="x"> 后缀文字', "前缀A  后缀文字"),
++    (4, "前缀A ｜｜DSML｜｜ calls 后缀文字", "前缀A   后缀文字"),
++    (5, "前缀A ｜｜DSML｜｜ 后缀B", "前缀A  后缀B"),
++    (6, "这个标记写作 ｜｜DSML｜｜", "这个标记写作 "),
++    (7, "他问「｜｜DSML｜｜是什么意思」", "他问「｜｜DSML｜｜是什么意思」"),
++    (8, "看 `｜｜DSML｜｜ calls` 这个", "看 `｜｜DSML｜｜ calls` 这个"),
++    (9, "说明\n```\n<｜｜DSML｜｜ calls>示例</｜｜DSML｜｜ calls>\n```\n结束",
++        "说明\n```\n<｜｜DSML｜｜ calls>示例</｜｜DSML｜｜ calls>\n```\n结束"),
++    (10, "他问「｜｜DSML｜｜ calls> 后缀", "他问「 后缀"),
++    (11, "前缀A ｜｜DSML｜｜ 未知标签> 后缀B", "前缀A  未知标签> 后缀B"),
++    (12, '前缀A ｜｜DSML｜｜ invoke name="a>b"> 后缀文字', "前缀A  后缀文字"),
++    (13, '前缀A ｜｜DSML｜｜ invoke name="a>b 后缀文字',
++         '前缀A   name="a>b 后缀文字'),
++    (14, "前缀A ｜｜DSML｜｜ invoke name='a>b'> 后缀文字", "前缀A  后缀文字"),
++    (15, "他说的 don't 和 owners' 都在正文里", "他说的 don't 和 owners' 都在正文里"),
++    (16, "她说「it's fine」然后走了", "她说「it's fine」然后走了"),
++    (17, "第一段「引号开头\n\n第二段结尾」", "第一段「引号开头\n\n第二段结尾」"),
++    (18, "第一段「引号开头\n第二段结尾」", "第一段「引号开头\n第二段结尾」"),
++    (19, "前缀A ｜｜DSML｜｜ callsxyz> 后缀B", "前缀A  callsxyz> 后缀B"),
++    (20, "前缀A ｜｜DSML｜｜ tool_calls> 后缀B", "前缀A  tool_calls> 后缀B"),
++    (21, "<｜｜DSML｜｜ calls>看 `code` 示例</｜｜DSML｜｜ calls>",
++         "<｜｜DSML｜｜ calls>看 `code` 示例</｜｜DSML｜｜ calls>"),
++    (22, "第一段「\r\n｜｜DSML｜｜ calls>正文\r\n\r\n第二段结尾」",
++         "第一段「\r\n正文\r\n\r\n第二段结尾」"),
++    (23, "看 `a\\`b` 这个", "看 `a\\`b` 这个"),
++    (24, '<｜｜DSML｜｜ calls name="a>b">正文</｜｜DSML｜｜ calls>', ""),
++    (25, '<｜｜DSML｜｜ calls name="a>b', '<｜｜DSML｜｜ calls name="a>b'),
++    (26, "<｜｜DSML｜｜ calls>正文", "正文"),
++    (27, "<｜｜DSML｜｜ calls>正文</｜｜DSML｜｜ invoke>",
++         "<｜｜DSML｜｜ calls>正文</｜｜DSML｜｜ invoke>"),
++    (28, "</｜｜DSML｜｜ invoke> 前缀", "</｜｜DSML｜｜ invoke> 前缀"),
++    (29, "｜DSML｜ calls> 后缀", " 后缀"),
++    (30, "前缀A ｜｜DSML｜｜ 后缀B", "前缀A  后缀B"),
++    (31, "<｜｜DSML｜｜ calls><｜｜DSML｜｜ invoke>x</｜｜DSML｜｜ invoke></｜｜DSML｜｜ calls>", ""),
++]
++for _n, _src, _want in V7_CASES:
++    _got = txg.finalize_text(_src)
++    ok(f"v7 规范 #{_n}", _got == _want, repr(_got))
++
++print("\n---- 十五、P1-A2 v4 关键案例 1–14 ----")
++V4_CASES = [
++    (1, "</｜｜DSML｜｜ invoke> 前缀", "</｜｜DSML｜｜ invoke> 前缀"),
++    (2, "</｜DSML｜ invoke> 前缀", "</｜DSML｜ invoke> 前缀"),
++    (3, "<｜｜DSML｜｜ calls><｜｜DSML｜｜ invoke>x</｜｜DSML｜｜ calls>",
++        "<｜｜DSML｜｜ calls><｜｜DSML｜｜ invoke>x</｜｜DSML｜｜ calls>"),
++    (4, "<｜｜DSML｜｜ calls><｜｜DSML｜｜ invoke>x</｜｜DSML｜｜ invoke>",
++        "<｜｜DSML｜｜ calls><｜｜DSML｜｜ invoke>x</｜｜DSML｜｜ invoke>"),
++    (5, "外层<｜｜DSML｜｜ calls>完整内层<｜｜DSML｜｜ invoke>x</｜｜DSML｜｜ invoke>",
++        "外层<｜｜DSML｜｜ calls>完整内层<｜｜DSML｜｜ invoke>x</｜｜DSML｜｜ invoke>"),
++    (6, '<｜｜DSML｜｜ calls name="a>b">正文</｜｜DSML｜｜ calls>', ""),
++    (7, "「<｜｜DSML｜｜ calls>示例</｜｜DSML｜｜ calls>」",
++        "「<｜｜DSML｜｜ calls>示例</｜｜DSML｜｜ calls>」"),
++    (8, "<｜DSML｜ calls>", ""),
++    (9, '{"a": "b\\"c"}', '{"a": "b\\"c"}'),
++    (13, "<｜｜DSML｜｜ calls 后缀", "<｜｜DSML｜｜ calls 后缀"),
++    (14, "</｜｜DSML｜｜ invoke> <｜｜DSML｜｜ calls>正文",
++         "</｜｜DSML｜｜ invoke> 正文"),
++]
++for _n, _src, _want in V4_CASES:
++    _got = txg.finalize_text(_src)
++    ok(f"v4 案例 #{_n}", _got == _want, repr(_got))
++
++print("\n---- 十六、attrs 三状态 ----")
++for _label, _text, _want in [
++    ("FOUND_END", '<｜｜DSML｜｜ calls name="x">', "FOUND_END"),
++    ("UNTERMINATED_ATTRIBUTE", '<｜｜DSML｜｜ calls name="x', "UNTERMINATED_ATTRIBUTE"),
++    ("MISSING_END", '<｜｜DSML｜｜ calls', "MISSING_END"),
++]:
++    _m = txg._marker_at(_text, 0)
++    _st, _idx = txg._scan_attrs(_text, _m["end"])
++    ok(f"_scan_attrs {_label}", _st == _want, _st)
++
++print("\n---- 十七、P1-A2 fail-closed 注入（三条链路） ----")
++for _fn in ("_code_regions", "_scan_attrs", "_match_r1"):
++    _orig = getattr(txg, _fn)
++
++    def _inject(*_a, **_k):
++        raise RuntimeError("injected")
++
++    setattr(txg, _fn, _inject)
++    _ev = guard_ev(f"{DSML} calls>正文")
++    asyncio.run(g.guard(_ev))
++    ok(f"注入 {_fn} → 不发送（发送次数 0）",
++       _ev.stopped is True and len(_ev._result.chain) == 0)
++    setattr(txg, _fn, _orig)
++
++print("\n---- 十八、P1-A2 幂等 + 性能 ----")
++for _name, _src in [
++    ("完整结构", "<｜｜DSML｜｜ calls>x</｜｜DSML｜｜ calls>"),
++    ("R2-A", "前缀A ｜｜DSML｜｜ calls> 后缀"),
++    ("R3", "前缀A ｜｜DSML｜｜ 后缀B"),
++    ("引号保护", "「<｜｜DSML｜｜ calls>示例</｜｜DSML｜｜ calls>」"),
++    ("CRLF 跨段", "第一段「\r\n｜｜DSML｜｜ calls>正文\r\n\r\n第二段结尾」"),
++]:
++    _once = txg.finalize_text(_src)
++    _twice = txg.finalize_text(_once)
++    ok(f"P1-A2 幂等：{_name}", _once == _twice, repr(_twice))
++
++import time as _time  # noqa: E402
++
++_unit = ("正常正文，包含一些说明文字和标点。" * 8
++         + "<｜｜DSML｜｜ calls>示例</｜｜DSML｜｜ calls>\n")
++_big = (_unit * 40)[:5000]
++_t0 = _time.perf_counter()
++for _ in range(10):
++    txg.finalize_text(_big)
++_dt = (_time.perf_counter() - _t0) / 10 * 1000
++ok("5KB 文本 < 10ms", _dt < 10, f"{_dt:.2f}ms")
++
++print("\n---- 十九、2026-11-20 修订：第二种闭合形式 `<｜｜DSML｜｜ /name>` ----")
++NEW_CLOSE_CASES = [
++    ("完整新闭合", "<｜｜DSML｜｜ calls>正文<｜｜DSML｜｜ /calls>", ""),
++    ("嵌套新闭合",
++     "<｜｜DSML｜｜ calls><｜｜DSML｜｜ invoke>x<｜｜DSML｜｜ /invoke><｜｜DSML｜｜ /calls>", ""),
++    ("大小写", "<｜｜DSML｜｜ CALLS>正文<｜｜DSML｜｜ /Calls>", ""),
++    ("半角竖线新闭合", "<||DSML|| calls>正文<||DSML|| /calls>", ""),
++    ("闭合尾部空格", "<｜｜DSML｜｜ calls>正文<｜｜DSML｜｜ /calls  >", ""),
++    ("属性引号不影响新闭合",
++     '<｜｜DSML｜｜ calls name="a>b">正文<｜｜DSML｜｜ /calls>', ""),
++    ("孤立新闭合", "<｜｜DSML｜｜ /calls>", "<｜｜DSML｜｜ /calls>"),
++    ("孤立新闭合前缀", "</x><｜｜DSML｜｜ /calls> 后缀", "</x><｜｜DSML｜｜ /calls> 后缀"),
++    ("错名新闭合", "<｜｜DSML｜｜ calls>正文<｜｜DSML｜｜ /invoke>",
++     "<｜｜DSML｜｜ calls>正文<｜｜DSML｜｜ /invoke>"),
++    ("未知标签新闭合", "<｜｜DSML｜｜ calls>正文<｜｜DSML｜｜ /unknown>",
++     "正文<｜｜DSML｜｜ /unknown>"),
++    ("带属性新闭合", '<｜｜DSML｜｜ calls>正文<｜｜DSML｜｜ /calls name="x">',
++     '正文<｜｜DSML｜｜ /calls name="x">'),
++    ("带属性标准闭合", '<｜｜DSML｜｜ calls>正文</｜｜DSML｜｜ calls name="x">',
++     '<｜｜DSML｜｜ calls>正文</｜｜DSML｜｜ calls name="x">'),
++    ("行内代码内新闭合", "看 `<｜｜DSML｜｜ calls>示例<｜｜DSML｜｜ /calls>` 这个",
++     "看 `<｜｜DSML｜｜ calls>示例<｜｜DSML｜｜ /calls>` 这个"),
++    ("引号内新闭合", "「<｜｜DSML｜｜ calls>示例<｜｜DSML｜｜ /calls>」",
++     "「<｜｜DSML｜｜ calls>示例<｜｜DSML｜｜ /calls>」"),
++    ("R1-f 代码相交", "<｜｜DSML｜｜ calls>看 `code` 示例<｜｜DSML｜｜ /calls>",
++     "<｜｜DSML｜｜ calls>看 `code` 示例<｜｜DSML｜｜ /calls>"),
++    ("跨段新闭合", "<｜｜DSML｜｜ calls>\n\n正文<｜｜DSML｜｜ /calls>",
++     "\n正文<｜｜DSML｜｜ /calls>"),
++    ("缺少空格", "<｜｜DSML｜｜calls>正文<｜｜DSML｜｜/calls>", "正文<｜｜DSML｜｜/calls>"),
++    ("</< 兼容", "</<｜｜DSML｜｜ invoke>", "</<｜｜DSML｜｜ invoke>"),
++]
++for _name, _src, _want in NEW_CLOSE_CASES:
++    _got = txg.finalize_text(_src)
++    ok(f"新闭合：{_name}", _got == _want, repr(_got))
++
++# 带属性/未知标签的负例：不能误判 COMPLETE、不能删正文
++for _name, _src in [
++    ("带属性新闭合", '<｜｜DSML｜｜ calls>正文<｜｜DSML｜｜ /calls name="x">'),
++    ("带属性标准闭合", '<｜｜DSML｜｜ calls>正文</｜｜DSML｜｜ calls name="x">'),
++    ("未知标签新闭合", "<｜｜DSML｜｜ calls>正文<｜｜DSML｜｜ /unknown>"),
++]:
++    _out = txg.finalize_text(_src)
++    ok(f"新闭合负例不删正文：{_name}", "正文" in _out, repr(_out))
++    ok(f"新闭合负例不进 COMPLETE：{_name}", _out != "", repr(_out))
++
++# 完整 LEAK 不再整段保留，且不残留任何 DSML 标记
++_leak_out = txg.finalize_text(LEAK)
++ok("完整 LEAK 清理为空", _leak_out == "", repr(_leak_out))
++ok("完整 LEAK 不残留 DSML", "DSML" not in _leak_out, repr(_leak_out))
++
++# 新闭合幂等
++for _name, _src in [
++    ("完整新闭合", "<｜｜DSML｜｜ calls>x<｜｜DSML｜｜ /calls>"),
++    ("孤立新闭合", "<｜｜DSML｜｜ /calls>"),
++    ("带属性新闭合", '<｜｜DSML｜｜ calls>正文<｜｜DSML｜｜ /calls name="x">'),
++]:
++    _once = txg.finalize_text(_src)
++    _twice = txg.finalize_text(_once)
++    ok(f"新闭合幂等：{_name}", _once == _twice, repr(_twice))
++
++print("\n---- 二十、2026-11-20 v9 复审修订（引号感知终点 / 非法候选跳过） ----")
++V10_CASES = [
++    # 标准闭合属性值含 `>` 且属性未闭合：不因 find(">") 截断而误删后面内容
++    ("标准闭合属性值含 > 且未闭合",
++     '<｜｜DSML｜｜ calls>正文</｜｜DSML｜｜ calls name="a>｜｜DSML｜｜ calls>',
++     '<｜｜DSML｜｜ calls>正文</｜｜DSML｜｜ calls name="a>｜｜DSML｜｜ calls>'),
++    # 标准闭合属性值含 `>` 且闭合：整段按异常处理，不判 COMPLETE、不删正文
++    ("标准闭合属性值含 >",
++     '<｜｜DSML｜｜ calls>正文</｜｜DSML｜｜ calls name="a>b">',
++     '<｜｜DSML｜｜ calls>正文</｜｜DSML｜｜ calls name="a>b">'),
++]
++for _name, _src, _want in V10_CASES:
++    _got = txg.finalize_text(_src)
++    ok(f"v10：{_name}", _got == _want, repr(_got))
++
++# 新闭合候选带属性值含 `>`：不能误判 COMPLETE，正文保留
++_v10a = txg.finalize_text('<｜｜DSML｜｜ calls>正文<｜｜DSML｜｜ /calls name="a>b">')
++ok("v10：新闭合候选属性值含 > 不删正文", "正文" in _v10a, repr(_v10a))
++ok("v10：新闭合候选属性值含 > 不进 COMPLETE", _v10a != "", repr(_v10a))
++
++# 非法新闭合候选内部还有标记：整体跳过，不把内部标记当结构、不吞正文
++_v10b = txg.finalize_text("<｜｜DSML｜｜ calls>正文<｜｜DSML｜｜ /bad <｜｜DSML｜｜ invoke>x")
++ok("v10：非法候选内部标记不吞正文", "正文" in _v10b and "x" in _v10b, repr(_v10b))
++ok("v10：非法候选整体隔离、内部标记保真",
++   "｜｜DSML｜｜ invoke" in _v10b, repr(_v10b))
++
++_v10c = txg.finalize_text("<｜｜DSML｜｜ calls>正文<｜｜DSML｜｜ /bad <｜｜DSML｜｜ invoke>>尾巴")
++ok("v10：非法候选 + 内部 > 不误删正文", "正文" in _v10c and "尾巴" in _v10c, repr(_v10c))
++ok("v10：非法候选 + 内部 > 隔离保真",
++   "｜｜DSML｜｜ invoke" in _v10c, repr(_v10c))
++
++print("\n---- 二十一、2026-11-20 v11 修订：非法候选隔离贯穿扫描（KEEP_ME） ----")
++KEEP_CASES = [
++    ("栈内候选 + UNCLOSED_SINGLE",
++     f"{DSML} calls>KEEP_ME{DSML} /bad>TAIL", ("KEEP_ME", "TAIL")),
++    ("顶层孤立候选",
++     f"前缀{DSML} /bad>KEEP_ME 后缀", ("前缀", "KEEP_ME", "后缀")),
++    ("顶层孤立候选 + 内部完整 invoke",
++     f"前缀{DSML} /bad {DSML} invoke>INNER{DSML} /invoke>>TAIL 后缀",
++     ("INNER", "TAIL", "后缀")),
++    ("候选内完整 invoke（栈内）",
++     f"{DSML} calls>KEEP_ME{DSML} /bad {DSML} invoke>INNER{DSML} /invoke>>TAIL",
++     ("KEEP_ME", "INNER", "TAIL")),
++    ("候选之后尾部裸标记",
++     f"{DSML} calls>KEEP_ME{DSML} /bad>TAIL {DSML} 后缀",
++     ("KEEP_ME", "TAIL", "后缀")),
++    ("候选之后尾部完整结构",
++     f"{DSML} calls>KEEP_ME{DSML} /bad>TAIL {DSML} invoke>X{DSML} /invoke>尾部",
++     ("KEEP_ME", "TAIL", "X", "尾部")),
++    ("候选属性含 >",
++     f'{DSML} calls>KEEP_ME{DSML} /bad name="a>b">TAIL',
++     ("KEEP_ME", "TAIL")),
++]
++for _name, _src, _must in KEEP_CASES:
++    _out = txg.finalize_text(_src)
++    ok(f"v11 隔离：{_name} 正文保留", all(x in _out for x in _must), repr(_out))
++
++# 候选之后仍按规范处理：外层完整但含候选 → R1-f 跳过外层；候选之后的合法结构照常清理
++_r1f = txg.finalize_text(
++    f"{DSML} calls>KEEP_ME{DSML} /bad></{DSML} calls>TAIL {DSML} invoke>X{DSML} /invoke>")
++ok("v11 隔离后：候选之后的完整结构仍按规范清理", "X" not in _r1f, repr(_r1f))
++ok("v11 隔离后：R1-f 不删候选内部正文", "KEEP_ME" in _r1f and "TAIL" in _r1f, repr(_r1f))
++
++# R1-c / MISMATCH / skip_to：只删该删的，不扩大正文删除
++_r1c = txg.finalize_text(f"{DSML} calls>KEEP_ME{DSML} /bad>TAIL")
++ok("v11 R1-c 只删外层起始标签", _r1c.startswith("KEEP_ME"), repr(_r1c))
++_mm = txg.finalize_text(f"{DSML} calls>KEEP_ME{DSML} /invoke>TAIL")
++ok("v11 MISMATCH 不删正文", "KEEP_ME" in _mm and "TAIL" in _mm, repr(_mm))
++
+ print("\n==== 汇总 ====")
+ if FAILS:
+     print(f"FAILED {len(FAILS)}: {FAILS}")

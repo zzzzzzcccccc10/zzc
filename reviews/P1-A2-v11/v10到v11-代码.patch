@@ -1,0 +1,164 @@
+--- /tmp/zzc/reviews/P1-A2-v10/snapshot/astrbot_plugin_tool_xml_guard/main.py	2026-11-20 22:09:39.007072576 +0800
++++ snapshot/astrbot_plugin_tool_xml_guard/main.py	2026-11-20 22:33:50.555632142 +0800
+@@ -558,6 +558,42 @@
+     return m.start() if m else len(text)
+ 
+ 
++def _candidate_regions(text: str, code_regions):
++    """非法新闭合候选：从标记起点到候选终点整体隔离。
++
++    候选定义：带尖括号的双竖线起始标记，标记后（可隔空白）以 `/` 开头，
++    但没有通过 `_match_new_close()` 的严格校验。
++    隔离区间不参与 R1/R2/R3，也不让普通 XML 清理进入；候选之后的内容照常处理。
++    """
++    out = []
++    n = len(text)
++    i = 0
++    while i < n:
++        ri = _region_index(code_regions, i)
++        if ri is not None:
++            i = code_regions[ri][1]
++            continue
++        m = _find_marker(text, i)
++        if not m:
++            break
++        ri = _region_index(code_regions, m["start"])
++        if ri is not None:
++            i = code_regions[ri][1]
++            continue
++        if m["kind"] == "open_double" and m["angle"] and _match_new_close(text, m) is None:
++            j = m["end"]
++            while j < n and text[j] in " \t":
++                j += 1
++            if j < n and text[j] == "/":
++                st, gt = _scan_attrs(text, m["end"])
++                end = gt + 1 if st == "FOUND_END" else n
++                out.append((m["start"], end))
++                i = end
++                continue
++        i = max(m["end"], i + 1)
++    return _merge_regions(out)
++
++
+ def _match_r1(text: str, pos: int, regions, max_depth_box=None):
+     """从 pos 处的双竖线起始标签开始做栈式配对。
+ 
+@@ -568,16 +604,17 @@
+     if nc_first is not None:
+         # 孤立的第二种闭合形式：整体保留（与 R1-d 一致）
+         return _Match("ORPHAN_CLOSE", start=pos, skip_to=nc_first[1])
++    # 先认标签名：标记后不是白名单标签 → 不是 R1 起始，交给 R2/R3，
++    # 不能先扫属性（否则 MISSING_END 会把整段吞到末尾）
++    tag = _match_tag(text, first["end"])
++    if tag is None:
++        return _Match("NOT_R1")
+     status, gt = _scan_attrs(text, first["end"])
+     if status == "UNTERMINATED_ATTRIBUTE":
+         return _Match("ATTR_UNTERMINATED", start=pos, skip_to=len(text))
+     if status == "MISSING_END":
+         return _Match("ATTR_UNTERMINATED", start=pos, skip_to=len(text))
+ 
+-    tag = _match_tag(text, first["end"])
+-    if tag is None:
+-        return _Match("NOT_R1")
+-
+     para_end = _paragraph_end(text, gt + 1)
+     stack = [tag[0]]
+     depth = 1
+@@ -596,8 +633,13 @@
+         if m["start"] > para_end:
+             return _Match("CROSS_PARAGRAPH", start=pos, tag_end=gt + 1)
+         i = m["start"]
++        ri = _region_index(regions, i)
++        if ri is not None:
++            # 保护区 / 隔离区内的标记不参与配对，也不回流
++            i = regions[ri][1]
++            continue
+         kind = m["kind"]
+-        if kind == "open_double":
++        if kind == "open_double" and m["angle"]:
+             nc = _match_new_close(text, m)
+             if nc is not None:
+                 # 第二种闭合形式参与原有的严格栈式配对
+@@ -610,8 +652,7 @@
+                     return _Match("COMPLETE", start=pos, end=nc[1])
+                 i = nc[1]
+                 continue
+-            # 格式错误的新闭合候选（标记后是 `/` 开头但未通过严格校验）：
+-            # 整体跳过到候选终点，不从 m["end"] 逐字符继续扫描
++            # 格式错误的新闭合候选（兜底；正常已由 _candidate_regions 隔离）
+             j = m["end"]
+             while j < n and text[j] in " \t":
+                 j += 1
+@@ -619,15 +660,17 @@
+                 st2, g3 = _scan_attrs(text, m["end"])
+                 i = g3 + 1 if st2 == "FOUND_END" else n
+                 continue
++            # 先认标签名：标记后不是白名单标签（如裸标记后跟普通正文）→ 跳过，
++            # 不能当成起始标签扫描属性，否则会误触发 ATTR_UNTERMINATED 吞掉整段
++            t2 = _match_tag(text, m["end"])
++            if t2 is None:
++                i = m["end"]
++                continue
+             st, g2 = _scan_attrs(text, m["end"])
+             if st == "UNTERMINATED_ATTRIBUTE":
+                 return _Match("ATTR_UNTERMINATED", start=pos, skip_to=n)
+             if st == "MISSING_END":
+                 return _Match("ATTR_UNTERMINATED", start=pos, skip_to=n)
+-            t2 = _match_tag(text, m["end"])
+-            if t2 is None:
+-                i = m["end"]
+-                continue
+             stack.append(t2[0])
+             depth = max(depth, len(stack))
+             i = g2 + 1
+@@ -718,21 +761,24 @@
+     syntax = _syntax_regions(t, code)
+     quotes = _quote_regions(t, syntax)
+     regions = _merge_regions(code + quotes)
++    isolated = _candidate_regions(t, code)
++    # 主循环 / R1 / 普通 XML 都用 skip：保护区 + 非法候选隔离区
++    skip = _merge_regions(regions + isolated)
+ 
+     dels = []
+     i = 0
+     n = len(t)
+     while i < n:
+-        ri = _region_index(regions, i)
++        ri = _region_index(skip, i)
+         if ri is not None:
+-            i = regions[ri][1]
++            i = skip[ri][1]
+             continue
+         m = _find_marker(t, i)
+         if not m:
+             break
+-        ri = _region_index(regions, m["start"])
++        ri = _region_index(skip, m["start"])
+         if ri is not None:
+-            i = regions[ri][1]
++            i = skip[ri][1]
+             continue
+         i = m["start"]
+         kind = m["kind"]
+@@ -749,9 +795,9 @@
+                 # 孤立的新闭合形式：整体保留，不删、不回流 R2/R3
+                 i = nc[1]
+                 continue
+-            res = _match_r1(t, i, regions)
++            res = _match_r1(t, i, skip)
+             if res.kind == "COMPLETE":
+-                if _overlaps(regions, res.start, res.end):
++                if _overlaps(skip, res.start, res.end):
+                     i = res.end
+                     continue
+                 dels.append((res.start, res.end))
+@@ -783,7 +829,7 @@
+             dels.append((tag[2], tag[1]))
+             i = tag[1]
+ 
+-    dels.extend(_xml_deletions(t, regions))
++    dels.extend(_xml_deletions(t, skip))
+     return _apply_deletions(t, dels)
+ 
+ 

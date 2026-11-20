@@ -1,0 +1,90 @@
+--- "/tmp/zzc/reviews/P1-A2-v10/snapshot/\346\265\213\350\257\225/test_out_guard.py"	2026-11-20 22:09:39.007072576 +0800
++++ "snapshot/\346\265\213\350\257\225/test_out_guard.py"	2026-11-20 22:33:50.555632142 +0800
+@@ -70,9 +70,9 @@
+ for name, src, want in [
+     ("普通竖线标记", "保留 A <|random_token|> 保留 B", "保留 A <|random_token|> 保留 B"),
+     ("孤立斜杠", "价格 </ 3，其他", "价格 </ 3，其他"),
+-    # v7 4.1：起始标签形态但后面没有 `>`（MISSING_END）→ 不删任何字符
+-    ("DSML 后跟说明文字（MISSING_END → 原样）", f"{DSML} 普通说明文字不应该被删",
+-     f"{DSML} 普通说明文字不应该被删"),
++    # 标记后不是白名单标签 → 不算 R1 起始，按 R3 只删标记（空白原样）
++    ("DSML 后跟说明文字（R3 → 只删标记）", f"{DSML} 普通说明文字不应该被删",
++     " 普通说明文字不应该被删"),
+ ]:
+     got = txg.finalize_text(src)
+     ok(f"不误删：{name}", got == want, repr(got))
+@@ -639,9 +639,9 @@
+     ("错名新闭合", "<｜｜DSML｜｜ calls>正文<｜｜DSML｜｜ /invoke>",
+      "<｜｜DSML｜｜ calls>正文<｜｜DSML｜｜ /invoke>"),
+     ("未知标签新闭合", "<｜｜DSML｜｜ calls>正文<｜｜DSML｜｜ /unknown>",
+-     "正文 /unknown>"),
++     "正文<｜｜DSML｜｜ /unknown>"),
+     ("带属性新闭合", '<｜｜DSML｜｜ calls>正文<｜｜DSML｜｜ /calls name="x">',
+-     '正文 /calls name="x">'),
++     '正文<｜｜DSML｜｜ /calls name="x">'),
+     ("带属性标准闭合", '<｜｜DSML｜｜ calls>正文</｜｜DSML｜｜ calls name="x">',
+      '<｜｜DSML｜｜ calls>正文</｜｜DSML｜｜ calls name="x">'),
+     ("行内代码内新闭合", "看 `<｜｜DSML｜｜ calls>示例<｜｜DSML｜｜ /calls>` 这个",
+@@ -652,7 +652,7 @@
+      "<｜｜DSML｜｜ calls>看 `code` 示例<｜｜DSML｜｜ /calls>"),
+     ("跨段新闭合", "<｜｜DSML｜｜ calls>\n\n正文<｜｜DSML｜｜ /calls>",
+      "\n正文<｜｜DSML｜｜ /calls>"),
+-    ("缺少空格", "<｜｜DSML｜｜calls>正文<｜｜DSML｜｜/calls>", "正文/calls>"),
++    ("缺少空格", "<｜｜DSML｜｜calls>正文<｜｜DSML｜｜/calls>", "正文<｜｜DSML｜｜/calls>"),
+     ("</< 兼容", "</<｜｜DSML｜｜ invoke>", "</<｜｜DSML｜｜ invoke>"),
+ ]
+ for _name, _src, _want in NEW_CLOSE_CASES:
+@@ -707,11 +707,51 @@
+ # 非法新闭合候选内部还有标记：整体跳过，不把内部标记当结构、不吞正文
+ _v10b = txg.finalize_text("<｜｜DSML｜｜ calls>正文<｜｜DSML｜｜ /bad <｜｜DSML｜｜ invoke>x")
+ ok("v10：非法候选内部标记不吞正文", "正文" in _v10b and "x" in _v10b, repr(_v10b))
+-ok("v10：非法候选内部标记不残留 DSML", "DSML" not in _v10b, repr(_v10b))
++ok("v10：非法候选整体隔离、内部标记保真",
++   "｜｜DSML｜｜ invoke" in _v10b, repr(_v10b))
+ 
+ _v10c = txg.finalize_text("<｜｜DSML｜｜ calls>正文<｜｜DSML｜｜ /bad <｜｜DSML｜｜ invoke>>尾巴")
+ ok("v10：非法候选 + 内部 > 不误删正文", "正文" in _v10c and "尾巴" in _v10c, repr(_v10c))
+-ok("v10：非法候选 + 内部 > 无 DSML 残留", "DSML" not in _v10c, repr(_v10c))
++ok("v10：非法候选 + 内部 > 隔离保真",
++   "｜｜DSML｜｜ invoke" in _v10c, repr(_v10c))
++
++print("\n---- 二十一、2026-11-20 v11 修订：非法候选隔离贯穿扫描（KEEP_ME） ----")
++KEEP_CASES = [
++    ("栈内候选 + UNCLOSED_SINGLE",
++     f"{DSML} calls>KEEP_ME{DSML} /bad>TAIL", ("KEEP_ME", "TAIL")),
++    ("顶层孤立候选",
++     f"前缀{DSML} /bad>KEEP_ME 后缀", ("前缀", "KEEP_ME", "后缀")),
++    ("顶层孤立候选 + 内部完整 invoke",
++     f"前缀{DSML} /bad {DSML} invoke>INNER{DSML} /invoke>>TAIL 后缀",
++     ("INNER", "TAIL", "后缀")),
++    ("候选内完整 invoke（栈内）",
++     f"{DSML} calls>KEEP_ME{DSML} /bad {DSML} invoke>INNER{DSML} /invoke>>TAIL",
++     ("KEEP_ME", "INNER", "TAIL")),
++    ("候选之后尾部裸标记",
++     f"{DSML} calls>KEEP_ME{DSML} /bad>TAIL {DSML} 后缀",
++     ("KEEP_ME", "TAIL", "后缀")),
++    ("候选之后尾部完整结构",
++     f"{DSML} calls>KEEP_ME{DSML} /bad>TAIL {DSML} invoke>X{DSML} /invoke>尾部",
++     ("KEEP_ME", "TAIL", "X", "尾部")),
++    ("候选属性含 >",
++     f'{DSML} calls>KEEP_ME{DSML} /bad name="a>b">TAIL',
++     ("KEEP_ME", "TAIL")),
++]
++for _name, _src, _must in KEEP_CASES:
++    _out = txg.finalize_text(_src)
++    ok(f"v11 隔离：{_name} 正文保留", all(x in _out for x in _must), repr(_out))
++
++# 候选之后仍按规范处理：外层完整但含候选 → R1-f 跳过外层；候选之后的合法结构照常清理
++_r1f = txg.finalize_text(
++    f"{DSML} calls>KEEP_ME{DSML} /bad></{DSML} calls>TAIL {DSML} invoke>X{DSML} /invoke>")
++ok("v11 隔离后：候选之后的完整结构仍按规范清理", "X" not in _r1f, repr(_r1f))
++ok("v11 隔离后：R1-f 不删候选内部正文", "KEEP_ME" in _r1f and "TAIL" in _r1f, repr(_r1f))
++
++# R1-c / MISMATCH / skip_to：只删该删的，不扩大正文删除
++_r1c = txg.finalize_text(f"{DSML} calls>KEEP_ME{DSML} /bad>TAIL")
++ok("v11 R1-c 只删外层起始标签", _r1c.startswith("KEEP_ME"), repr(_r1c))
++_mm = txg.finalize_text(f"{DSML} calls>KEEP_ME{DSML} /invoke>TAIL")
++ok("v11 MISMATCH 不删正文", "KEEP_ME" in _mm and "TAIL" in _mm, repr(_mm))
+ 
+ print("\n==== 汇总 ====")
+ if FAILS:
