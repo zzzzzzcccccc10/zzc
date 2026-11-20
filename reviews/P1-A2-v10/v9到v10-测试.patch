@@ -1,0 +1,38 @@
+--- "/tmp/zzc/reviews/P1-A2-v9/snapshot/\346\265\213\350\257\225/test_out_guard.py"	2026-11-20 21:35:39.014555050 +0800
++++ "snapshot/\346\265\213\350\257\225/test_out_guard.py"	2026-11-20 22:09:39.007072576 +0800
+@@ -684,6 +684,35 @@
+     _twice = txg.finalize_text(_once)
+     ok(f"新闭合幂等：{_name}", _once == _twice, repr(_twice))
+ 
++print("\n---- 二十、2026-11-20 v9 复审修订（引号感知终点 / 非法候选跳过） ----")
++V10_CASES = [
++    # 标准闭合属性值含 `>` 且属性未闭合：不因 find(">") 截断而误删后面内容
++    ("标准闭合属性值含 > 且未闭合",
++     '<｜｜DSML｜｜ calls>正文</｜｜DSML｜｜ calls name="a>｜｜DSML｜｜ calls>',
++     '<｜｜DSML｜｜ calls>正文</｜｜DSML｜｜ calls name="a>｜｜DSML｜｜ calls>'),
++    # 标准闭合属性值含 `>` 且闭合：整段按异常处理，不判 COMPLETE、不删正文
++    ("标准闭合属性值含 >",
++     '<｜｜DSML｜｜ calls>正文</｜｜DSML｜｜ calls name="a>b">',
++     '<｜｜DSML｜｜ calls>正文</｜｜DSML｜｜ calls name="a>b">'),
++]
++for _name, _src, _want in V10_CASES:
++    _got = txg.finalize_text(_src)
++    ok(f"v10：{_name}", _got == _want, repr(_got))
++
++# 新闭合候选带属性值含 `>`：不能误判 COMPLETE，正文保留
++_v10a = txg.finalize_text('<｜｜DSML｜｜ calls>正文<｜｜DSML｜｜ /calls name="a>b">')
++ok("v10：新闭合候选属性值含 > 不删正文", "正文" in _v10a, repr(_v10a))
++ok("v10：新闭合候选属性值含 > 不进 COMPLETE", _v10a != "", repr(_v10a))
++
++# 非法新闭合候选内部还有标记：整体跳过，不把内部标记当结构、不吞正文
++_v10b = txg.finalize_text("<｜｜DSML｜｜ calls>正文<｜｜DSML｜｜ /bad <｜｜DSML｜｜ invoke>x")
++ok("v10：非法候选内部标记不吞正文", "正文" in _v10b and "x" in _v10b, repr(_v10b))
++ok("v10：非法候选内部标记不残留 DSML", "DSML" not in _v10b, repr(_v10b))
++
++_v10c = txg.finalize_text("<｜｜DSML｜｜ calls>正文<｜｜DSML｜｜ /bad <｜｜DSML｜｜ invoke>>尾巴")
++ok("v10：非法候选 + 内部 > 不误删正文", "正文" in _v10c and "尾巴" in _v10c, repr(_v10c))
++ok("v10：非法候选 + 内部 > 无 DSML 残留", "DSML" not in _v10c, repr(_v10c))
++
+ print("\n==== 汇总 ====")
+ if FAILS:
+     print(f"FAILED {len(FAILS)}: {FAILS}")

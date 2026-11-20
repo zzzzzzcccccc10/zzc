@@ -1,0 +1,55 @@
+--- /tmp/zzc/reviews/P1-A2-v9/snapshot/astrbot_plugin_tool_xml_guard/main.py	2026-11-20 21:35:39.010555025 +0800
++++ snapshot/astrbot_plugin_tool_xml_guard/main.py	2026-11-20 22:09:39.007072576 +0800
+@@ -441,8 +441,8 @@
+             i = code_regions[ri][1]
+             continue
+         if m["is_close"]:
+-            gt = text.find(">", m["end"])
+-            end = gt if gt != -1 else n
++            st2, gt = _scan_attrs(text, m["end"])
++            end = gt if st2 == "FOUND_END" else n
+         else:
+             status, idx = _scan_attrs(text, m["end"])
+             end = idx if status == "FOUND_END" else n
+@@ -610,6 +610,15 @@
+                     return _Match("COMPLETE", start=pos, end=nc[1])
+                 i = nc[1]
+                 continue
++            # 格式错误的新闭合候选（标记后是 `/` 开头但未通过严格校验）：
++            # 整体跳过到候选终点，不从 m["end"] 逐字符继续扫描
++            j = m["end"]
++            while j < n and text[j] in " \t":
++                j += 1
++            if j < n and text[j] == "/":
++                st2, g3 = _scan_attrs(text, m["end"])
++                i = g3 + 1 if st2 == "FOUND_END" else n
++                continue
+             st, g2 = _scan_attrs(text, m["end"])
+             if st == "UNTERMINATED_ATTRIBUTE":
+                 return _Match("ATTR_UNTERMINATED", start=pos, skip_to=n)
+@@ -625,10 +634,11 @@
+         elif kind == "close_double":
+             ct = _match_close_tag(text, m)
+             if ct is None:
+-                # 闭合标签带属性 / 多余文本 / 未知标签：按异常处理，不猜、不删
+-                g2 = text.find(">", m["end"])
++                # 闭合标签带属性 / 多余文本 / 未知标签：按异常处理，不猜、不删。
++                # 终点用引号感知扫描，属性值里的 `>` 不能截断 skip_to
++                st2, g2 = _scan_attrs(text, m["end"])
+                 return _Match("MISMATCH", start=pos,
+-                              skip_to=(g2 + 1 if g2 != -1 else n))
++                              skip_to=(g2 + 1 if st2 == "FOUND_END" else n))
+             if not stack:
+                 return _Match("ORPHAN_CLOSE", start=pos, skip_to=ct[1])
+             if ct[0] != stack[-1]:
+@@ -729,8 +739,8 @@
+ 
+         if kind in ("close_double", "close_single"):
+             # R1-d / 4.2：孤立闭合标签整体保留（单竖线闭合也不残留 `</`）
+-            gt = t.find(">", m["end"])
+-            i = gt + 1 if gt != -1 else n
++            st2, gt = _scan_attrs(t, m["end"])
++            i = gt + 1 if st2 == "FOUND_END" else n
+             continue
+ 
+         if kind == "open_double" and m["angle"]:
